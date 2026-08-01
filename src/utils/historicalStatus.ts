@@ -1,0 +1,3 @@
+import dayjs from "dayjs";
+import type { Candidate, CandidateStatus } from "../types/recruitment";
+export function getCandidateStatusAtDate(candidate:Candidate, selectedDate:string):CandidateStatus|null { if(dayjs(candidate.resumeSubmitDate).isAfter(dayjs(selectedDate),"day")) return null; const events=(candidate.statusEvents||[]).filter(e=>!dayjs(e.effectiveAt).isAfter(dayjs(selectedDate).endOf("day"))).sort((a,b)=>dayjs(b.effectiveAt).valueOf()-dayjs(a.effectiveAt).valueOf()); return events[0]?.status ?? (dayjs(candidate.updatedAt).isAfter(dayjs(selectedDate).endOf("day")) ? "简历待筛选" : candidate.currentStatus); }

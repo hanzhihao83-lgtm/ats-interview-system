@@ -1,0 +1,8 @@
+node_modules/
+dist/
+dist-server/
+.env
+uploads/
+data/*.db
+data/*.sqlite
+data/kim-interviews.json

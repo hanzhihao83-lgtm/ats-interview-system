@@ -1,0 +1,3 @@
+import type { Candidate } from "../types/recruitment";
+import { calculateOverviewMetrics, detectRisks } from "./statistics";
+export function generateDailyReport(rows:Candidate[], date:string){ const m=calculateOverviewMetrics(rows,date), r=detectRisks(rows,date); return `${date} 人员招聘与入职日报\n\n一、人员状态\n当前项目中 ${m.project} 人，培训中 ${m.training} 人，待入职 ${m.pending} 人。\n\n二、当日招聘进展\n当日供应商共提交简历 ${m.submitted} 份，面试通过 ${m.interviewPassed} 人，实际入职 ${m.joined} 人。\n\n三、重点风险\n目前有 ${r.feedback.length} 人面试结果待反馈，${r.absent.length} 人面试未到场，${r.delayed.length} 人入职延期，${r.overdue.length} 人超过预计入职日期尚未报到，${r.giveup.length} 人候选人放弃。\n\n四、后续跟进\n请相关供应商及时反馈待确认人员情况，重点跟进面试反馈超时及逾期未报到人员。`; }
