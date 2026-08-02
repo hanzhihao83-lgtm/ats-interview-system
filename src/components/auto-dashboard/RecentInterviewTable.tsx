@@ -1,0 +1,5 @@
+import { Button, Card, Space, Table, Tag, message } from "antd"; import { CopyOutlined, LinkOutlined } from "@ant-design/icons";
+export default function RecentInterviewTable({ data }: { data: any[] }) {
+  const meeting = (_: unknown, row: any) => row.meetingUrl ? <Button type="link" icon={<LinkOutlined />} href={row.meetingUrl} target="_blank">加入会议</Button> : row.meetingCode ? <Button type="link" icon={<CopyOutlined />} onClick={() => { void navigator.clipboard?.writeText(row.meetingCode); message.success("会议号已复制"); }}>{row.meetingCode}</Button> : "—";
+  return <Card title="近期面试"><Table rowKey="id" dataSource={data} pagination={{ pageSize: 8 }} scroll={{ x: 1000 }} columns={[{ title: "候选人", dataIndex: "name" }, { title: "供应商", dataIndex: "supplier" }, { title: "业务方向", dataIndex: "businessType", render: (v) => <Tag>{v}</Tag> }, { title: "面试时间", dataIndex: "interviewTimeRaw" }, { title: "腾讯会议", render: meeting }, { title: "面试结果", dataIndex: "interviewResult" }, { title: "定级", dataIndex: "level" }, { title: "面试官", dataIndex: "interviewer" }]} /></Card>;
+}

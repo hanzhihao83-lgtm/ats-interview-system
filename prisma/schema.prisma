@@ -1,0 +1,354 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum RecordStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum ImportTaskStatus {
+  UPLOADED
+  PARSING
+  WAITING_MAPPING
+  VALIDATING
+  WAITING_CONFIRMATION
+  IMPORTING
+  COMPLETED
+  PARTIAL_FAILED
+  FAILED
+}
+
+enum ValidationStatus {
+  VALID
+  WARNING
+  INVALID
+}
+
+enum DuplicateLevel {
+  NONE
+  EXACT
+  HIGH_SUSPECT
+  SAME_NAME_DIFFERENT_PERSON
+  MANUAL_REVIEW
+}
+
+enum HandlingAction {
+  CREATE
+  SKIP
+  UPDATE
+  MERGE
+  MANUAL_REVIEW
+}
+
+enum ImportRowStatus {
+  PENDING
+  IMPORTED
+  SKIPPED
+  FAILED
+  MANUAL_REVIEW
+}
+
+model Supplier {
+  id         String       @id @default(cuid())
+  name       String
+  code       String       @unique
+  status     RecordStatus @default(ACTIVE)
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
+  candidates Candidate[]
+
+  @@index([name])
+}
+
+model JobPosition {
+  id          String       @id @default(cuid())
+  name        String
+  projectName String?
+  department  String?
+  status      RecordStatus @default(ACTIVE)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  candidates  Candidate[]
+
+  @@index([name])
+}
+
+model Candidate {
+  id                   String                 @id @default(cuid())
+  candidateNo          String                 @unique
+  name                 String
+  normalizedName       String
+  phone                String?
+  phoneNormalized      String?
+  phoneMasked          String?
+  email                String?
+  emailNormalized      String?
+  emailMasked          String?
+  supplierId           String
+  positionId           String
+  projectName          String?
+  university           String?
+  normalizedUniversity String?
+  major                String?
+  highestEducation     String?
+  graduationYear       Int?
+  isFreshGraduate      Boolean?
+  resumeSubmitDate     DateTime?
+  resumeResult         String?
+  currentStatus        String
+  expectedEntryDate    DateTime?
+  actualEntryDate      DateTime?
+  leaveDate            DateTime?
+  remark               String?
+  source               String?
+  createdAt            DateTime               @default(now())
+  createdBy            String?
+  updatedAt            DateTime               @updatedAt
+  updatedBy            String?
+  deletedAt            DateTime?
+  supplier             Supplier               @relation(fields: [supplierId], references: [id])
+  position             JobPosition            @relation(fields: [positionId], references: [id])
+  statusEvents         CandidateStatusEvent[]
+  interviews           Interview[]
+  operationLogs        OperationLog[]
+  importRows           CandidateImportRow[]
+
+  @@index([normalizedName])
+  @@index([phoneNormalized])
+  @@index([emailNormalized])
+  @@index([supplierId])
+  @@index([positionId])
+  @@index([currentStatus])
+  @@index([resumeSubmitDate])
+}
+
+model CandidateStatusEvent {
+  id          String    @id @default(cuid())
+  candidateId String
+  status      String
+  effectiveAt DateTime
+  operator    String?
+  remark      String?
+  createdAt   DateTime  @default(now())
+  candidate   Candidate @relation(fields: [candidateId], references: [id])
+
+  @@index([candidateId, effectiveAt])
+}
+
+model Interview {
+  id                 String    @id @default(cuid())
+  candidateId        String
+  round              Int       @default(1)
+  roundName          String?
+  interviewer        String?
+  scheduledStartTime DateTime
+  scheduledEndTime   DateTime?
+  result             String?
+  status             String
+  meetingProvider    String?
+  meetingId          String?
+  meetingUrl         String?
+  feedback           String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  candidate          Candidate @relation(fields: [candidateId], references: [id])
+
+  @@index([candidateId])
+  @@index([scheduledStartTime])
+}
+
+model CandidateImportTask {
+  id                String               @id @default(cuid())
+  taskNo            String               @unique
+  originalFileName  String
+  storedFileName    String
+  fileHash          String
+  fileSize          Int
+  sheetName         String?
+  totalRows         Int                  @default(0)
+  validRows         Int                  @default(0)
+  warningRows       Int                  @default(0)
+  invalidRows       Int                  @default(0)
+  duplicateRows     Int                  @default(0)
+  importedRows      Int                  @default(0)
+  skippedRows       Int                  @default(0)
+  failedRows        Int                  @default(0)
+  status            ImportTaskStatus     @default(UPLOADED)
+  fieldMapping      Json?
+  uploadedBy        String?
+  defaultSupplierId String?
+  defaultPositionId String?
+  uploadedAt        DateTime             @default(now())
+  confirmedAt       DateTime?
+  completedAt       DateTime?
+  errorMessage      String?
+  rows              CandidateImportRow[]
+  logs              OperationLog[]
+  fileRecord        ImportFileRecord?
+
+  @@index([fileHash])
+  @@index([uploadedAt])
+}
+
+model CandidateImportRow {
+  id                  String              @id @default(cuid())
+  taskId              String
+  rowNumber           Int
+  rawData             Json
+  normalizedData      Json
+  name                String?
+  phoneMasked         String?
+  supplierName        String?
+  positionName        String?
+  university          String?
+  validationStatus    ValidationStatus    @default(INVALID)
+  errors              Json
+  warnings            Json
+  duplicateLevel      DuplicateLevel      @default(NONE)
+  duplicateReasons    Json
+  matchedCandidateIds Json
+  handlingAction      HandlingAction      @default(CREATE)
+  importStatus        ImportRowStatus     @default(PENDING)
+  importedCandidateId String?
+  failureReason       String?
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+  task                CandidateImportTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  importedCandidate   Candidate?          @relation(fields: [importedCandidateId], references: [id])
+
+  @@unique([taskId, rowNumber])
+  @@index([taskId, validationStatus])
+  @@index([taskId, duplicateLevel])
+}
+
+model OperationLog {
+  id           String               @id @default(cuid())
+  module       String
+  action       String
+  candidateId  String?
+  importTaskId String?
+  oldValue     Json?
+  newValue     Json?
+  operator     String?
+  reason       String?
+  operatedAt   DateTime             @default(now())
+  candidate    Candidate?           @relation(fields: [candidateId], references: [id])
+  importTask   CandidateImportTask? @relation(fields: [importTaskId], references: [id])
+
+  @@index([candidateId])
+  @@index([importTaskId])
+  @@index([operatedAt])
+}
+
+model ImportFileRecord {
+  id          String              @id @default(cuid())
+  taskId      String              @unique
+  fileHash    String
+  contentType String
+  storagePath String
+  createdAt   DateTime            @default(now())
+  cleanedAt   DateTime?
+  task        CandidateImportTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([fileHash])
+}
+
+model ImportedDataset {
+  id               String   @id @default(cuid())
+  name             String
+  originalFileName String
+  storedFileName   String
+  fileHash         String
+  status           String
+  progress         Int      @default(0)
+  statusMessage    String?
+  totalSheets      Int      @default(0)
+  processedSheets  Int      @default(0)
+  candidateCount   Int      @default(0)
+  supplierCount    Int      @default(0)
+  warningCount     Int      @default(0)
+  dashboardId      String?
+  createdBy        String
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  candidates ImportedCandidate[]
+  suppliers  ImportedSupplierSummary[]
+  dashboard  GeneratedDashboard?
+
+  @@index([fileHash])
+  @@index([createdAt])
+}
+
+model ImportedCandidate {
+  id                 String    @id @default(cuid())
+  datasetId          String
+  name               String
+  supplier           String?
+  businessType       String?
+  resumeFile         String?
+  interviewTimeRaw   String?
+  interviewStartTime DateTime?
+  interviewEndTime   DateTime?
+  meetingCode        String?
+  meetingUrl         String?
+  meetingTextRaw     String?
+  interviewResult    String?
+  level              String?
+  interviewer        String?
+  interviewComment   String?
+  entryDate          DateTime?
+  entryStatus        String?
+  sourceSheet        String
+  sourceRow          Int
+  createdAt          DateTime  @default(now())
+
+  dataset ImportedDataset @relation(fields: [datasetId], references: [id], onDelete: Cascade)
+
+  @@index([datasetId])
+  @@index([supplier])
+  @@index([businessType])
+  @@index([interviewResult])
+  @@index([entryStatus])
+  @@index([interviewStartTime])
+}
+
+model ImportedSupplierSummary {
+  id                   String   @id @default(cuid())
+  datasetId            String
+  supplier             String
+  videoResumeCount     Int?
+  audioResumeCount     Int?
+  videoInterviewPassed Int?
+  videoConfirmedEntry  Int?
+  videoActualEntry     Int?
+  audioInterviewPassed Int?
+  audioConfirmedEntry  Int?
+  audioActualEntry     Int?
+  status               String?
+  remark               String?
+  sourceSheet          String
+  createdAt            DateTime @default(now())
+
+  dataset ImportedDataset @relation(fields: [datasetId], references: [id], onDelete: Cascade)
+
+  @@index([datasetId])
+  @@index([supplier])
+}
+
+model GeneratedDashboard {
+  id        String   @id @default(cuid())
+  datasetId String   @unique
+  name      String
+  config    Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  dataset ImportedDataset @relation(fields: [datasetId], references: [id], onDelete: Cascade)
+}

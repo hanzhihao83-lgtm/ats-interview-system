@@ -1,156 +1,739 @@
-import { useState } from "react";
-import { Alert, Badge, Button, Card, Descriptions, Empty, Select, Space, Steps, Table, Tag, Typography, Upload, message } from "antd";
-import { DownloadOutlined, LeftOutlined, UploadOutlined } from "@ant-design/icons";
-import * as XLSX from "xlsx";
+import { useEffect, useState } from "react";
+import {
+  Alert,
+  Badge,
+  Button,
+  Card,
+  Descriptions,
+  Empty,
+  Input,
+  Select,
+  Space,
+  Steps,
+  Table,
+  Tag,
+  Typography,
+  Upload,
+  message,
+} from "antd";
+import {
+  DownloadOutlined,
+  LeftOutlined,
+  ReloadOutlined,
+  UploadOutlined,
+} from "@ant-design/icons";
 import type { Candidate } from "../types/recruitment";
-import type { CandidateImportRow, ImportContext } from "../types/candidateImport";
-import { candidateFieldAliases, createCandidateFromImport, detectImportDuplicate, downloadImportTemplate, isInterviewScheduleSheet, isRecruitmentSummarySheet, mapHeaders, parseRecruitmentSummaryRows, rowsFromSheet, toImportRows, toInterviewScheduleRows, validateCandidateImportRow, validateRecruitmentSummaryRow, type RecruitmentSummaryRow } from "../utils/candidateImport";
+import { downloadImportTemplate } from "../utils/candidateImport";
+import { api } from "../api/backend";
 
-interface Props { existing: Candidate[]; onBack: () => void; onImport: (rows: Candidate[]) => void }
-const fields = Object.keys(candidateFieldAliases);
-const fieldLabels: Record<string, string> = { name: "候选人姓名", phone: "手机号", vendor: "供应商", project: "项目", position: "岗位", university: "大学", major: "专业", resumeSubmitDate: "简历提交日期", currentStatus: "当前状态" };
-
-export default function CandidateImportPage({ existing, onBack, onImport }: Props) {
-  const [step, setStep] = useState(0);
-  const [fileName, setFileName] = useState("");
-  const [book, setBook] = useState<XLSX.WorkBook>();
-  const [sheet, setSheet] = useState("");
-  const [headers, setHeaders] = useState<string[]>([]);
-  const [mapping, setMapping] = useState<Record<string, string | undefined>>({});
-  const [rows, setRows] = useState<CandidateImportRow[]>([]);
-  const [summaryRows, setSummaryRows] = useState<RecruitmentSummaryRow[]>([]);
-  const [summaryMode, setSummaryMode] = useState(false);
-  const [scheduleMode, setScheduleMode] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [api, contextHolder] = message.useMessage();
-  const context: ImportContext = { vendors: ["人瑞", "供应商B", "供应商C", "供应商D", "外企德科"], positions: ["AI 数据标注员", "AI 数据质检员", "视频评测工程师", "Caption 标注员", "项目助理"], projects: [], statuses: ["简历待筛选", "简历未通过", "待安排面试", "待面试", "面试待反馈", "面试未通过", "面试通过", "待确认入职", "待入职", "培训中", "项目中", "候选人放弃", "已离职", "异常"], existing, batch: rows, allowMissingPosition: scheduleMode };
-
-  const parseSheet = (name: string, workbook = book) => {
-    if (!workbook) return;
-    const data = rowsFromSheet(workbook.Sheets[name]);
-    setSheet(name);
-    setHeaders(data.headers);
-    if (isInterviewScheduleSheet(data.headers)) {
-      setScheduleMode(true);
-      setSummaryMode(false);
-      setSummaryRows([]);
-      const scheduleRows = toInterviewScheduleRows(data.rows);
-      const scheduleContext = { ...context, allowMissingPosition: true, batch: scheduleRows };
-      const checked = scheduleRows.map((row) => validateCandidateImportRow(row, scheduleContext));
-      setRows(checked.map((row) => ({ ...row, duplicate: detectImportDuplicate(row, { ...scheduleContext, batch: checked }) })));
-      setStep(2);
-      return;
-    }
-    setScheduleMode(false);
-    if (isRecruitmentSummarySheet(data.headers)) {
-      setSummaryMode(true);
-      setSummaryRows(parseRecruitmentSummaryRows(data.rows, data.headers));
-      setRows([]);
-      setStep(2);
-      return;
-    }
-    setSummaryMode(false);
-    setSummaryRows([]);
-    const nextMapping = mapHeaders(data.headers);
-    setMapping(nextMapping);
-    setRows(toImportRows(data.rows, nextMapping));
-    setStep(1);
+type TaskStatus =
+  | "UPLOADED"
+  | "PARSING"
+  | "WAITING_MAPPING"
+  | "WAITING_CONFIRMATION"
+  | "IMPORTING"
+  | "COMPLETED"
+  | "PARTIAL_FAILED"
+  | "FAILED";
+interface ImportTask {
+  id: string;
+  originalFileName: string;
+  status: TaskStatus;
+  totalRows: number;
+  validRows: number;
+  warningRows: number;
+  invalidRows: number;
+  duplicateRows: number;
+  importedRows: number;
+  skippedRows: number;
+  failedRows: number;
+}
+interface ImportRow {
+  id: string;
+  rowNumber: number;
+  name?: string;
+  phoneMasked?: string;
+  supplierName?: string;
+  positionName?: string;
+  university?: string;
+  validationStatus: "VALID" | "WARNING" | "INVALID";
+  errors: string[];
+  warnings: string[];
+  duplicateLevel: string;
+  duplicateReasons: string[];
+  handlingAction: string;
+  importStatus: string;
+  failureReason?: string;
+}
+interface Preview {
+  task: ImportTask;
+  summary: {
+    total: number;
+    valid: number;
+    warning: number;
+    invalid: number;
+    duplicate: number;
   };
+  rows: ImportRow[];
+  pagination: { page: number; pageSize: number; total: number };
+}
+interface Props {
+  existing?: Candidate[];
+  onBack: () => void;
+  onImport?: (rows: Candidate[]) => void;
+  onComplete?: () => void;
+}
+const fieldLabels: Record<string, string> = {
+  name: "候选人姓名",
+  phone: "手机号",
+  email: "邮箱",
+  supplier: "供应商",
+  position: "岗位",
+  projectName: "项目",
+  university: "大学",
+  major: "专业",
+  highestEducation: "学历",
+  graduationYear: "毕业年份",
+  resumeSubmitDate: "简历提交日期",
+  currentStatus: "当前状态",
+  expectedEntryDate: "预计入职日期",
+  actualEntryDate: "实际入职日期",
+  leaveDate: "离职日期",
+  remark: "备注",
+};
+const duplicateLabels: Record<string, string> = {
+  NONE: "无重复",
+  EXACT: "确定重复",
+  HIGH_SUSPECT: "高度疑似",
+  SAME_NAME_DIFFERENT_PERSON: "同名不同人",
+  MANUAL_REVIEW: "人工复核",
+};
+const validationLabels = { VALID: "通过", WARNING: "警告", INVALID: "失败" };
 
-  const upload = async (file: File) => {
-    if (!/\.(xlsx|xls|csv)$/i.test(file.name)) return api.error("仅支持 .xlsx、.xls 或 .csv 文件");
-    if (file.size > 10 * 1024 * 1024) return api.error("文件不能超过 10MB");
+export default function CandidateImportPage({ onBack, onComplete }: Props) {
+  const [step, setStep] = useState(0),
+    [busy, setBusy] = useState(false),
+    [taskId, setTaskId] = useState(""),
+    [fileName, setFileName] = useState(""),
+    [sheets, setSheets] = useState<string[]>([]),
+    [sheetName, setSheetName] = useState(""),
+    [headers, setHeaders] = useState<string[]>([]),
+    [mapping, setMapping] = useState<Record<string, string>>({}),
+    [preview, setPreview] = useState<Preview>(),
+    [page, setPage] = useState(1),
+    [validationStatus, setValidationStatus] = useState<string>(),
+    [duplicateLevel, setDuplicateLevel] = useState<string>(),
+    [keyword, setKeyword] = useState(""),
+    [history, setHistory] = useState<ImportTask[]>([]);
+  const [msg, holder] = message.useMessage();
+  const loadHistory = () =>
+    api<{ rows: ImportTask[] }>("/api/imports/candidates?page=1&pageSize=10")
+      .then((data) => setHistory(data.rows))
+      .catch(() => undefined);
+  useEffect(() => {
+    void loadHistory();
+  }, []);
+  const loadPreview = async (nextPage = page) => {
+    if (!taskId) return;
+    const params = new URLSearchParams({
+      page: String(nextPage),
+      pageSize: "20",
+    });
+    if (validationStatus) params.set("validationStatus", validationStatus);
+    if (duplicateLevel) params.set("duplicateLevel", duplicateLevel);
+    if (keyword) params.set("keyword", keyword);
     setBusy(true);
     try {
-      const bytes = await file.arrayBuffer();
-      const workbook = XLSX.read(bytes, { type: "array", cellDates: false, cellNF: false });
-      const names = workbook.SheetNames.filter((name) => rowsFromSheet(workbook.Sheets[name]).headers.length);
-      if (!names.length) throw new Error("没有识别到表头");
-      setBook(workbook);
-      setFileName(file.name);
-      parseSheet(names[0], workbook);
-      api.success(`已读取 ${file.name}`);
-    } catch {
-      api.error("Excel 读取失败，请确认文件未损坏且包含表头");
+      setPreview(
+        await api<Preview>(
+          `/api/imports/candidates/${taskId}/preview?${params}`,
+        ),
+      );
+      setPage(nextPage);
+    } catch (error) {
+      msg.error((error as Error).message);
     } finally {
       setBusy(false);
     }
   };
-
-  const validate = () => {
-    if (summaryMode) {
-      setSummaryRows((list) => list.map(validateRecruitmentSummaryRow));
+  useEffect(() => {
+    if (step === 3 && taskId) void loadPreview(1);
+  }, [step, taskId, validationStatus, duplicateLevel]);
+  const applyParsed = (data: {
+    headers?: string[];
+    mapping?: Record<string, string>;
+    sheets?: string[];
+    requiresSelection?: boolean;
+  }) => {
+    setSheets(data.sheets || sheets);
+    if (data.requiresSelection) {
+      setStep(1);
       return;
     }
-    const checked = rows.map((row) => validateCandidateImportRow(row, context));
-    const withDup = checked.map((row) => ({ ...row, duplicate: detectImportDuplicate(row, { ...context, batch: checked }) }));
-    setRows(withDup);
+    setHeaders(data.headers || []);
+    setMapping(data.mapping || {});
     setStep(2);
   };
-
-  const confirm = () => {
-    const valid = rows.filter((row) => row.validationStatus !== "校验失败" && row.action !== "跳过" && row.action !== "待人工复核");
-    if (!valid.length) return api.warning("没有可导入的数据");
-    onImport(valid.map(createCandidateFromImport));
+  const upload = async (file: File) => {
+    if (!/\.(xlsx|xls|csv)$/i.test(file.name)) {
+      msg.error("仅支持 .xlsx、.xls 或 .csv 文件");
+      return;
+    }
+    setBusy(true);
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      form.append("uploadedBy", "招聘专员");
+      const uploaded = await api<{
+        taskId: string;
+        fileName: string;
+        duplicateFile?: { taskNo: string };
+      }>("/api/imports/candidates/upload", { method: "POST", body: form });
+      setTaskId(uploaded.taskId);
+      setFileName(uploaded.fileName);
+      if (uploaded.duplicateFile)
+        msg.warning(
+          `相同文件曾以任务 ${uploaded.duplicateFile.taskNo} 上传，本次将创建新任务供复核`,
+        );
+      const parsed = await api<any>(
+        `/api/imports/candidates/${uploaded.taskId}/parse`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        },
+      );
+      applyParsed(parsed);
+      msg.success("文件已安全上传并由后端解析");
+    } catch (error) {
+      msg.error((error as Error).message);
+    } finally {
+      setBusy(false);
+    }
   };
-
-  const candidateColumns = [
-    { title: "行号", dataIndex: "rowNumber" },
+  const selectSheet = async () => {
+    if (!sheetName) return msg.warning("请选择工作表");
+    setBusy(true);
+    try {
+      applyParsed(
+        await api<any>(`/api/imports/candidates/${taskId}/select-sheet`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sheetName }),
+        }),
+      );
+    } catch (error) {
+      msg.error((error as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const saveMapping = async () => {
+    if (!["name", "supplier", "position"].every((key) => mapping[key]))
+      return msg.error("姓名、供应商和岗位必须映射");
+    if (new Set(Object.values(mapping)).size !== Object.values(mapping).length)
+      return msg.error("同一 Excel 列不能映射多个系统字段");
+    setBusy(true);
+    try {
+      await api(`/api/imports/candidates/${taskId}/mapping`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mapping }),
+      });
+      setStep(3);
+      await loadPreview(1);
+    } catch (error) {
+      msg.error((error as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const changeAction = async (row: ImportRow, handlingAction: string) => {
+    try {
+      await api(`/api/imports/candidates/${taskId}/rows/${row.rowNumber}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ handlingAction, operator: "招聘专员" }),
+      });
+      await loadPreview();
+    } catch (error) {
+      msg.error((error as Error).message);
+    }
+  };
+  const confirm = async () => {
+    setBusy(true);
+    try {
+      const result = await api<ImportTask>(
+        `/api/imports/candidates/${taskId}/confirm`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ operator: "招聘专员", allowWarnings: true }),
+        },
+      );
+      setPreview((old) => (old ? { ...old, task: result } : old));
+      setStep(5);
+      await loadHistory();
+      onComplete?.();
+      msg.success(
+        `导入完成：成功 ${result.importedRows} 行，跳过 ${result.skippedRows} 行`,
+      );
+    } catch (error) {
+      msg.error((error as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const reset = () => {
+    setStep(0);
+    setTaskId("");
+    setFileName("");
+    setSheets([]);
+    setSheetName("");
+    setHeaders([]);
+    setMapping({});
+    setPreview(undefined);
+  };
+  const cleanupFile = async (id: string) => {
+    try {
+      await api(`/api/imports/candidates/${id}/file`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ operator: "招聘专员" }),
+      });
+      msg.success("临时文件已清理，数据库导入记录仍保留");
+      await loadHistory();
+    } catch (error) {
+      msg.error((error as Error).message);
+    }
+  };
+  const columns = [
+    { title: "行", dataIndex: "rowNumber", width: 65 },
     { title: "姓名", dataIndex: "name" },
-    { title: "供应商", dataIndex: "vendor" },
-    { title: "岗位", dataIndex: "position" },
-    { title: "状态", dataIndex: "currentStatus" },
-    { title: "校验", render: (_: unknown, row: CandidateImportRow) => <Tag color={row.validationStatus === "校验失败" ? "red" : row.validationStatus === "警告" ? "orange" : "green"}>{row.validationStatus}</Tag> },
-    { title: "重复风险", render: (_: unknown, row: CandidateImportRow) => row.duplicate?.level && row.duplicate.level !== "无重复" ? <Tag color={row.duplicate.level === "确定重复" ? "red" : "orange"}>{row.duplicate.level}</Tag> : "—" },
-    { title: "处理方式", render: (_: unknown, row: CandidateImportRow) => <Select size="small" value={row.action} options={["创建为新候选人", "跳过", "待人工复核"].map((v) => ({ label: v, value: v }))} onChange={(value) => setRows((list) => list.map((item) => item.rowNumber === row.rowNumber ? { ...item, action: value } : item))} /> },
-    { title: "问题", render: (_: unknown, row: CandidateImportRow) => [...row.errors, ...row.warnings].join("；") || "—" },
+    {
+      title: "手机号",
+      dataIndex: "phoneMasked",
+      render: (v?: string) => v || "—",
+    },
+    { title: "供应商", dataIndex: "supplierName" },
+    { title: "岗位", dataIndex: "positionName" },
+    {
+      title: "校验",
+      render: (_: unknown, row: ImportRow) => (
+        <Tag
+          color={
+            row.validationStatus === "INVALID"
+              ? "red"
+              : row.validationStatus === "WARNING"
+                ? "orange"
+                : "green"
+          }
+        >
+          {validationLabels[row.validationStatus]}
+        </Tag>
+      ),
+    },
+    {
+      title: "重复风险",
+      render: (_: unknown, row: ImportRow) => (
+        <Tag
+          color={
+            row.duplicateLevel === "EXACT"
+              ? "red"
+              : row.duplicateLevel === "NONE"
+                ? "default"
+                : "orange"
+          }
+        >
+          {duplicateLabels[row.duplicateLevel] || row.duplicateLevel}
+        </Tag>
+      ),
+    },
+    {
+      title: "处理方式",
+      width: 145,
+      render: (_: unknown, row: ImportRow) => (
+        <Select
+          size="small"
+          value={row.handlingAction}
+          disabled={row.validationStatus === "INVALID"}
+          options={["CREATE", "SKIP", "UPDATE", "MERGE", "MANUAL_REVIEW"].map(
+            (value) => ({
+              value,
+              label: (
+                {
+                  CREATE: "创建",
+                  SKIP: "跳过",
+                  UPDATE: "更新",
+                  MERGE: "合并",
+                  MANUAL_REVIEW: "人工复核",
+                } as Record<string, string>
+              )[value],
+            }),
+          )}
+          onChange={(value) => void changeAction(row, value)}
+        />
+      ),
+    },
+    {
+      title: "问题",
+      width: 280,
+      render: (_: unknown, row: ImportRow) =>
+        [
+          ...(row.errors || []),
+          ...(row.warnings || []),
+          ...(row.duplicateReasons || []),
+        ].join("；") || "—",
+    },
   ];
-
-  const summaryColumns = [
-    { title: "行号", dataIndex: "rowNumber", width: 70 },
-    { title: "日期", dataIndex: "date", render: (v?: string) => v || "—" },
-    { title: "供应商", dataIndex: "vendor", render: (v?: string) => v || "—" },
-    { title: "简历筛选量", dataIndex: "resumeScreened", render: (v?: number) => v ?? "—" },
-    { title: "简历通过量", dataIndex: "resumePassed", render: (v?: number) => v ?? "—" },
-    { title: "面试到场量", dataIndex: "interviewAttended", render: (v?: number) => v ?? "—" },
-    { title: "面试通过量", dataIndex: "interviewPassed", render: (v?: number) => v ?? "—" },
-    { title: "Offer接受量", dataIndex: "offersAccepted", render: (v?: number) => v ?? "—" },
-    { title: "校验结果", render: (_: unknown, row: RecruitmentSummaryRow) => <Tag color={row.validationStatus === "校验失败" ? "red" : row.validationStatus === "警告" ? "orange" : "green"}>{row.validationStatus}</Tag> },
-    { title: "错误和警告", render: (_: unknown, row: RecruitmentSummaryRow) => [...row.errors, ...row.warnings].join("；") || "—" },
-  ];
-
-  return <div className="content import-page">
-    {contextHolder}
-    <Space className="screening-header" wrap>
-      <Button icon={<LeftOutlined />} onClick={onBack}>返回候选人看板</Button>
-      <div>
-        <Typography.Title level={3} style={{ margin: 0 }}>Excel 批量导入</Typography.Title>
-        <Typography.Text type="secondary">兼容候选人明细表和招聘数据日报汇总表，系统会先识别格式再执行对应校验。</Typography.Text>
-      </div>
-      <Button icon={<DownloadOutlined />} onClick={() => downloadImportTemplate(true)}>下载示例模板</Button>
-      <Button onClick={() => downloadImportTemplate(false)}>下载空白模板</Button>
-    </Space>
-    <Steps current={step} items={[{ title: "上传文件" }, { title: "字段映射" }, { title: "校验预览" }, { title: "导入完成" }]} />
-    {step === 0 && <Card className="import-upload-card">
-      <Upload.Dragger accept=".xlsx,.xls,.csv" showUploadList={false} beforeUpload={(file) => { void upload(file as unknown as File); return false; }}>
-        <p><UploadOutlined style={{ fontSize: 36, color: "#1677ff" }} /></p>
-        <p>点击或拖拽 Excel / CSV 文件到这里</p>
-        <p className="muted">支持 .xlsx、.xls、.csv，最大 10MB</p>
-      </Upload.Dragger>
-      <div className="import-native-picker"><Button loading={busy} icon={<UploadOutlined />} onClick={() => document.getElementById("candidate-import-file")?.click()}>选择 Excel 文件</Button><input id="candidate-import-file" type="file" accept=".xlsx,.xls,.csv" hidden onChange={(e) => { const file = e.target.files?.[0]; if (file) void upload(file); e.currentTarget.value = ""; }} /></div>
-      <Alert type="info" showIcon message="系统会自动识别候选人明细或招聘数据日报格式，再执行对应校验。" />
-    </Card>}
-    {step === 1 && <Card title={summaryMode ? "招聘数据格式识别" : "字段映射"} extra={<Space><Button onClick={() => setStep(0)}>重新上传</Button>{!summaryMode && <Button type="primary" onClick={validate}>开始校验</Button>}</Space>}>
-      <Descriptions bordered size="small" column={1} items={[{ key: "file", label: "文件", children: fileName }, { key: "sheet", label: "工作表", children: <Select value={sheet} style={{ width: 280 }} options={(book?.SheetNames || []).map((name) => ({ label: name, value: name }))} onChange={(name) => parseSheet(name)} /> }, { key: "rows", label: "数据行数", children: summaryMode ? summaryRows.length : rows.length }]} />
-      {summaryMode ? <Alert style={{ marginTop: 16 }} type="info" showIcon message="已识别为招聘数据日报汇总格式，点击工作表后直接进入校验预览，不会创建候选人明细。" /> : <Table size="small" pagination={false} rowKey="field" dataSource={fields.map((field) => ({ field, header: mapping[field] === undefined ? "未映射" : headers[Number(mapping[field])] }))} columns={[{ title: "系统字段", dataIndex: "field", render: (v: string) => fieldLabels[v] || v }, { title: "Excel列", dataIndex: "header", render: (_: string, record: { field: string }) => <Select allowClear value={mapping[record.field]} style={{ width: 260 }} options={headers.map((header, index) => ({ label: header, value: String(index) }))} onChange={(value) => setMapping((old) => ({ ...old, [record.field]: value }))} /> }]} />}
-    </Card>}
-    {step === 2 && summaryMode ? <Card title="招聘数据校验预览" extra={<Space><Select size="small" value={sheet} style={{ width: 150 }} options={(book?.SheetNames || []).map((name) => ({ label: name, value: name }))} onChange={(name) => parseSheet(name)} /><Badge count={`共 ${summaryRows.length} 行`} /><Button onClick={() => setStep(0)}>重新上传</Button></Space>}>
-      <Alert type="info" showIcon message="已识别为招聘数据日报汇总格式，当前只做数据校验，不会创建候选人明细。" />
-      <Table rowKey="rowNumber" columns={summaryColumns} dataSource={summaryRows} pagination={{ pageSize: 10 }} scroll={{ x: 1200 }} rowClassName={(row) => row.validationStatus === "校验失败" ? "risk-row" : row.validationStatus === "警告" ? "warning-row" : ""} />
-    </Card> : step === 2 && <Card title="数据校验与导入预览" extra={<Space><Badge count={`共 ${rows.length} 行`} /><Button type="primary" onClick={confirm}>确认导入</Button></Space>}>
-      <Alert type={scheduleMode ? "info" : "warning"} showIcon message={scheduleMode ? "已识别为面试排期表：系统自动提取人选、供应商、面试时间、会议链接和面试官；岗位缺失时先填入待补充岗位，可在导入前处理。" : "校验失败行不能导入；警告和重复行请确认处理方式。"} />
-      <Table rowKey="rowNumber" columns={candidateColumns} dataSource={rows} pagination={{ pageSize: 10 }} scroll={{ x: 1200 }} rowClassName={(row) => row.validationStatus === "校验失败" ? "risk-row" : row.validationStatus === "警告" ? "warning-row" : ""} />
-    </Card>}
-    {step === 3 && <Card title="导入完成"><Empty description="候选人数据已写入看板" /><Button type="primary" onClick={onBack}>返回候选人列表</Button></Card>}
-  </div>;
+  return (
+    <div className="content import-page">
+      {holder}
+      <Space className="screening-header" wrap>
+        <Button icon={<LeftOutlined />} onClick={onBack}>
+          返回候选人看板
+        </Button>
+        <div>
+          <Typography.Title level={3} style={{ margin: 0 }}>
+            Excel 数据导入
+          </Typography.Title>
+          <Typography.Text type="secondary">
+            文件由服务端解析、校验和查重，确认后写入 PostgreSQL。
+          </Typography.Text>
+        </div>
+        <Button
+          icon={<DownloadOutlined />}
+          onClick={() => downloadImportTemplate(true)}
+        >
+          下载示例模板
+        </Button>
+      </Space>
+      <Steps
+        current={step}
+        items={[
+          { title: "上传文件" },
+          { title: "选择工作表" },
+          { title: "字段映射" },
+          { title: "校验与预览" },
+          { title: "确认导入" },
+          { title: "导入结果" },
+        ]}
+      />
+      {step === 0 && (
+        <>
+          <Card className="import-upload-card">
+            <Upload.Dragger
+              accept=".xlsx,.xls,.csv"
+              showUploadList={false}
+              disabled={busy}
+              beforeUpload={(file) => {
+                void upload(file as unknown as File);
+                return false;
+              }}
+            >
+              <p>
+                <UploadOutlined style={{ fontSize: 36, color: "#1677ff" }} />
+              </p>
+              <p>点击或拖拽 Excel / CSV 文件到这里</p>
+              <p className="muted">
+                最大 15MB、最多 5000 行；原文件保存在非公开目录
+              </p>
+            </Upload.Dragger>
+          </Card>
+          <Card
+            title="最近导入历史"
+            extra={
+              <Button
+                icon={<ReloadOutlined />}
+                onClick={() => void loadHistory()}
+              >
+                刷新
+              </Button>
+            }
+          >
+            <Table
+              size="small"
+              rowKey="id"
+              pagination={false}
+              dataSource={history}
+              columns={[
+                { title: "文件", dataIndex: "originalFileName" },
+                { title: "总行数", dataIndex: "totalRows" },
+                { title: "成功", dataIndex: "importedRows" },
+                { title: "失败", dataIndex: "failedRows" },
+                {
+                  title: "状态",
+                  dataIndex: "status",
+                  render: (value) => <Tag>{value}</Tag>,
+                },
+                {
+                  title: "操作",
+                  render: (_v, task: ImportTask) => (
+                    <Space>
+                      <Button
+                        size="small"
+                        onClick={() => {
+                          setTaskId(task.id);
+                          setFileName(task.originalFileName);
+                          if (task.status === "WAITING_CONFIRMATION")
+                            setStep(3);
+                          else if (
+                            ["COMPLETED", "PARTIAL_FAILED"].includes(
+                              task.status,
+                            )
+                          ) {
+                            setPreview({
+                              task,
+                              summary: {
+                                total: task.totalRows,
+                                valid: task.validRows,
+                                warning: task.warningRows,
+                                invalid: task.invalidRows,
+                                duplicate: task.duplicateRows,
+                              },
+                              rows: [],
+                              pagination: {
+                                page: 1,
+                                pageSize: 20,
+                                total: task.totalRows,
+                              },
+                            });
+                            setStep(5);
+                          } else msg.info("请重新上传原文件继续该任务");
+                        }}
+                      >
+                        继续/查看
+                      </Button>
+                      <Button
+                        size="small"
+                        danger
+                        onClick={() => void cleanupFile(task.id)}
+                      >
+                        清理文件
+                      </Button>
+                    </Space>
+                  ),
+                },
+              ]}
+            />
+          </Card>
+        </>
+      )}
+      {step === 1 && (
+        <Card title="选择包含候选人的工作表">
+          <Descriptions
+            bordered
+            items={[
+              { key: "file", label: "文件", children: fileName },
+              {
+                key: "sheet",
+                label: "工作表",
+                children: (
+                  <Select
+                    value={sheetName || undefined}
+                    placeholder="请选择"
+                    style={{ width: 280 }}
+                    options={sheets.map((value) => ({ value, label: value }))}
+                    onChange={setSheetName}
+                  />
+                ),
+              },
+            ]}
+          />
+          <Button
+            type="primary"
+            loading={busy}
+            onClick={() => void selectSheet()}
+            style={{ marginTop: 16 }}
+          >
+            解析所选工作表
+          </Button>
+        </Card>
+      )}
+      {step === 2 && (
+        <Card
+          title="字段映射"
+          extra={
+            <Button
+              type="primary"
+              loading={busy}
+              onClick={() => void saveMapping()}
+            >
+              保存并校验
+            </Button>
+          }
+        >
+          <Alert
+            type="info"
+            showIcon
+            message="姓名、供应商、岗位为必填；未识别列可以忽略。"
+          />
+          <Table
+            size="small"
+            pagination={false}
+            rowKey="field"
+            dataSource={Object.keys(fieldLabels).map((field) => ({ field }))}
+            columns={[
+              {
+                title: "系统字段",
+                dataIndex: "field",
+                render: (field: string) =>
+                  `${fieldLabels[field]}${["name", "supplier", "position"].includes(field) ? " *" : ""}`,
+              },
+              {
+                title: "Excel 列",
+                render: (_v, row: { field: string }) => (
+                  <Select
+                    allowClear
+                    value={mapping[row.field]}
+                    style={{ width: 280 }}
+                    options={headers.map((value) => ({ value, label: value }))}
+                    onChange={(value) =>
+                      setMapping((old) => {
+                        const next = { ...old };
+                        if (value) next[row.field] = value;
+                        else delete next[row.field];
+                        return next;
+                      })
+                    }
+                  />
+                ),
+              },
+            ]}
+          />
+        </Card>
+      )}
+      {step === 3 && (
+        <Card
+          title="数据库校验与预览"
+          extra={
+            <Space>
+              <Badge count={preview?.summary.invalid || 0} />
+              <Button onClick={() => setStep(2)}>调整映射</Button>
+              <Button
+                type="primary"
+                disabled={
+                  !preview ||
+                  preview.summary.valid + preview.summary.warning === 0
+                }
+                onClick={() => setStep(4)}
+              >
+                进入确认
+              </Button>
+            </Space>
+          }
+        >
+          <Space wrap style={{ marginBottom: 16 }}>
+            <Input.Search
+              placeholder="姓名、供应商或岗位"
+              value={keyword}
+              onChange={(event) => setKeyword(event.target.value)}
+              onSearch={() => void loadPreview(1)}
+              style={{ width: 240 }}
+            />
+            <Select
+              allowClear
+              placeholder="校验状态"
+              value={validationStatus}
+              options={["VALID", "WARNING", "INVALID"].map((value) => ({
+                value,
+                label: validationLabels[value as keyof typeof validationLabels],
+              }))}
+              onChange={setValidationStatus}
+            />
+            <Select
+              allowClear
+              placeholder="重复风险"
+              value={duplicateLevel}
+              options={Object.entries(duplicateLabels).map(
+                ([value, label]) => ({ value, label }),
+              )}
+              onChange={setDuplicateLevel}
+            />
+          </Space>
+          <Alert
+            type={preview?.summary.invalid ? "warning" : "success"}
+            showIcon
+            message={`共 ${preview?.summary.total || 0} 行：通过 ${preview?.summary.valid || 0}，警告 ${preview?.summary.warning || 0}，失败 ${preview?.summary.invalid || 0}，重复风险 ${preview?.summary.duplicate || 0}`}
+          />
+          <Table
+            loading={busy}
+            rowKey="id"
+            columns={columns}
+            dataSource={preview?.rows}
+            scroll={{ x: 1300 }}
+            pagination={{
+              current: page,
+              pageSize: 20,
+              total: preview?.pagination.total,
+              showSizeChanger: false,
+              onChange: (value) => void loadPreview(value),
+            }}
+          />
+        </Card>
+      )}
+      {step === 4 && (
+        <Card title="确认写入 PostgreSQL">
+          <Alert
+            type="warning"
+            showIcon
+            message="INVALID 行不会导入；WARNING 行将按当前选择导入；SKIP 与人工复核行不会写入候选人表。"
+          />
+          <Descriptions
+            bordered
+            column={2}
+            items={[
+              { key: "file", label: "文件", children: fileName },
+              {
+                key: "total",
+                label: "总行数",
+                children: preview?.summary.total,
+              },
+              {
+                key: "valid",
+                label: "可导入",
+                children:
+                  (preview?.summary.valid || 0) +
+                  (preview?.summary.warning || 0),
+              },
+              {
+                key: "invalid",
+                label: "失败",
+                children: preview?.summary.invalid,
+              },
+            ]}
+          />
+          <Space style={{ marginTop: 16 }}>
+            <Button onClick={() => setStep(3)}>返回预览</Button>
+            <Button
+              type="primary"
+              danger
+              loading={busy}
+              onClick={() => void confirm()}
+            >
+              确认导入
+            </Button>
+          </Space>
+        </Card>
+      )}
+      {step === 5 && (
+        <Card title="导入结果">
+          <Empty
+            description={`成功 ${preview?.task.importedRows || 0} 行，跳过 ${preview?.task.skippedRows || 0} 行，失败 ${preview?.task.failedRows || 0} 行`}
+          />
+          <Space>
+            <Button type="primary" onClick={onBack}>
+              返回候选人列表
+            </Button>
+            <Button onClick={reset}>继续导入</Button>
+            {taskId && (
+              <Button href={`/api/imports/candidates/${taskId}/errors/export`}>
+                下载失败明细
+              </Button>
+            )}
+          </Space>
+        </Card>
+      )}
+    </div>
+  );
 }

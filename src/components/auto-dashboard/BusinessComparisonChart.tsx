@@ -1,0 +1,2 @@
+import { Card } from "antd"; import ReactECharts from "echarts-for-react";
+export default function BusinessComparisonChart({ data }: { data: any[] }) { return <Card title="视频和音频对比"><ReactECharts option={{ tooltip: { trigger: "axis" }, legend: {}, xAxis: { type: "category", data: data.map((x) => x.businessType) }, yAxis: { type: "value", minInterval: 1 }, series: [["candidates", "候选人"], ["passed", "面试通过"], ["joined", "已入职"]].map(([field, name]) => ({ name, type: "bar", data: data.map((x) => x[field]) })) }} /></Card>; }

@@ -3,6 +3,8 @@ dist/
 dist-server/
 .env
 uploads/
+*.db
+*.sqlite
 data/*.db
 data/*.sqlite
 data/kim-interviews.json
