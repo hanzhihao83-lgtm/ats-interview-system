@@ -6,6 +6,8 @@ pages:
     - npm ci
     - npm run build
     - mv dist public
+  pages:
+    publish: public
   artifacts:
     paths:
       - public
