@@ -4,7 +4,7 @@ import { DownloadOutlined, LeftOutlined, UploadOutlined } from "@ant-design/icon
 import * as XLSX from "xlsx";
 import type { Candidate } from "../types/recruitment";
 import type { CandidateImportRow, ImportContext } from "../types/candidateImport";
-import { candidateFieldAliases, createCandidateFromImport, detectImportDuplicate, downloadImportTemplate, isRecruitmentSummarySheet, mapHeaders, parseRecruitmentSummaryRows, rowsFromSheet, toImportRows, validateCandidateImportRow, validateRecruitmentSummaryRow, type RecruitmentSummaryRow } from "../utils/candidateImport";
+import { candidateFieldAliases, createCandidateFromImport, detectImportDuplicate, downloadImportTemplate, isInterviewScheduleSheet, isRecruitmentSummarySheet, mapHeaders, parseRecruitmentSummaryRows, rowsFromSheet, toImportRows, toInterviewScheduleRows, validateCandidateImportRow, validateRecruitmentSummaryRow, type RecruitmentSummaryRow } from "../utils/candidateImport";
 
 interface Props { existing: Candidate[]; onBack: () => void; onImport: (rows: Candidate[]) => void }
 const fields = Object.keys(candidateFieldAliases);
@@ -20,15 +20,28 @@ export default function CandidateImportPage({ existing, onBack, onImport }: Prop
   const [rows, setRows] = useState<CandidateImportRow[]>([]);
   const [summaryRows, setSummaryRows] = useState<RecruitmentSummaryRow[]>([]);
   const [summaryMode, setSummaryMode] = useState(false);
+  const [scheduleMode, setScheduleMode] = useState(false);
   const [busy, setBusy] = useState(false);
   const [api, contextHolder] = message.useMessage();
-  const context: ImportContext = { vendors: ["人瑞", "供应商B", "供应商C", "供应商D"], positions: ["AI 数据标注员", "AI 数据质检员", "视频评测工程师", "Caption 标注员", "项目助理"], projects: [], statuses: ["简历待筛选", "简历未通过", "待安排面试", "待面试", "面试待反馈", "面试未通过", "面试通过", "待确认入职", "待入职", "培训中", "项目中", "候选人放弃", "已离职", "异常"], existing, batch: rows };
+  const context: ImportContext = { vendors: ["人瑞", "供应商B", "供应商C", "供应商D", "外企德科"], positions: ["AI 数据标注员", "AI 数据质检员", "视频评测工程师", "Caption 标注员", "项目助理"], projects: [], statuses: ["简历待筛选", "简历未通过", "待安排面试", "待面试", "面试待反馈", "面试未通过", "面试通过", "待确认入职", "待入职", "培训中", "项目中", "候选人放弃", "已离职", "异常"], existing, batch: rows, allowMissingPosition: scheduleMode };
 
   const parseSheet = (name: string, workbook = book) => {
     if (!workbook) return;
     const data = rowsFromSheet(workbook.Sheets[name]);
     setSheet(name);
     setHeaders(data.headers);
+    if (isInterviewScheduleSheet(data.headers)) {
+      setScheduleMode(true);
+      setSummaryMode(false);
+      setSummaryRows([]);
+      const scheduleRows = toInterviewScheduleRows(data.rows);
+      const scheduleContext = { ...context, allowMissingPosition: true, batch: scheduleRows };
+      const checked = scheduleRows.map((row) => validateCandidateImportRow(row, scheduleContext));
+      setRows(checked.map((row) => ({ ...row, duplicate: detectImportDuplicate(row, { ...scheduleContext, batch: checked }) })));
+      setStep(2);
+      return;
+    }
+    setScheduleMode(false);
     if (isRecruitmentSummarySheet(data.headers)) {
       setSummaryMode(true);
       setSummaryRows(parseRecruitmentSummaryRows(data.rows, data.headers));
@@ -136,7 +149,7 @@ export default function CandidateImportPage({ existing, onBack, onImport }: Prop
       <Alert type="info" showIcon message="已识别为招聘数据日报汇总格式，当前只做数据校验，不会创建候选人明细。" />
       <Table rowKey="rowNumber" columns={summaryColumns} dataSource={summaryRows} pagination={{ pageSize: 10 }} scroll={{ x: 1200 }} rowClassName={(row) => row.validationStatus === "校验失败" ? "risk-row" : row.validationStatus === "警告" ? "warning-row" : ""} />
     </Card> : step === 2 && <Card title="数据校验与导入预览" extra={<Space><Badge count={`共 ${rows.length} 行`} /><Button type="primary" onClick={confirm}>确认导入</Button></Space>}>
-      <Alert type="warning" showIcon message="校验失败行不能导入；警告和重复行请确认处理方式。" />
+      <Alert type={scheduleMode ? "info" : "warning"} showIcon message={scheduleMode ? "已识别为面试排期表：系统自动提取人选、供应商、面试时间、会议链接和面试官；岗位缺失时先填入待补充岗位，可在导入前处理。" : "校验失败行不能导入；警告和重复行请确认处理方式。"} />
       <Table rowKey="rowNumber" columns={candidateColumns} dataSource={rows} pagination={{ pageSize: 10 }} scroll={{ x: 1200 }} rowClassName={(row) => row.validationStatus === "校验失败" ? "risk-row" : row.validationStatus === "警告" ? "warning-row" : ""} />
     </Card>}
     {step === 3 && <Card title="导入完成"><Empty description="候选人数据已写入看板" /><Button type="primary" onClick={onBack}>返回候选人列表</Button></Card>}
