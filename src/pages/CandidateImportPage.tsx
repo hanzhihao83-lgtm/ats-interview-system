@@ -97,7 +97,6 @@ export default function CandidateImportPage({ existing, onBack, onImport }: Prop
   const candidateColumns = [
     { title: "行号", dataIndex: "rowNumber" },
     { title: "姓名", dataIndex: "name" },
-    { title: "手机号", dataIndex: "phone", render: (v?: string) => v ? `${v.slice(0, 3)}****${v.slice(-4)}` : "—" },
     { title: "供应商", dataIndex: "vendor" },
     { title: "岗位", dataIndex: "position" },
     { title: "状态", dataIndex: "currentStatus" },
