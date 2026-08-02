@@ -7,12 +7,25 @@ export const normalizeUniversityName = (name = "") => universityAliases[name.tri
 export const maskPhone = (phone?: string) => phone ? `${phone.slice(0, 3)}****${phone.slice(-4)}` : "—";
 const hash = (value: string) => Array.from(value).reduce((total, char) => ((total << 5) - total + char.charCodeAt(0)) | 0, 7).toString(16);
 
+const cleanExtractedField = (value: string) => value.replace(/[\r\n]/g, " ").replace(/[：:|｜,，;；].*$/, "").replace(/(本科|硕士|博士|学历|专业背景).*$/, "").trim();
+const extractUniversities = (text: string) => {
+  const labeled = text.match(/(?:毕业院校|毕业学校|学校|院校|大学)\s*[:：]?\s*([^\n|｜,，;；]{2,30})/i)?.[1];
+  const fromLabel = labeled ? (labeled.match(/[\u4e00-\u9fa5A-Za-z·（）()]{2,24}(?:大学|学院|学校)/)?.[0] || cleanExtractedField(labeled)) : "";
+  const all = [...text.matchAll(/[\u4e00-\u9fa5A-Za-z·（）()]{2,24}(?:大学|学院)/g)].map((match) => match[0]);
+  return [...new Set([fromLabel, ...all].filter((item) => item && !/教育经历|学校名称|毕业学校名称/.test(item)).map(normalizeUniversityName))];
+};
+const extractMajor = (text: string) => {
+  const labeled = text.match(/(?:所学专业|主修专业|专业名称|专业)\s*[:：]?\s*([^\n|｜,，;；]{2,40})/i)?.[1];
+  if (labeled) return cleanExtractedField(labeled);
+  return ["计算机科学与技术", "汉语言文学", "数据科学与大数据技术", "软件工程", "视觉传达设计", "数字媒体艺术", "人工智能", "网络与新媒体", "信息管理与信息系统"].find((item) => text.includes(item));
+};
+
 export function extractProfile(fileName: string, rawText: string, vendor: string): ResumeProfile {
   const text = rawText.replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n");
   const name = text.match(/(?:姓名|名字)[:： ]*([\u4e00-\u9fa5]{2,4})/)?.[1] || fileName.replace(/\.(pdf|docx?|png|jpe?g)$/i, "").split(/[-_ ]/)[0] || "待识别候选人";
   const phone = text.match(/1[3-9]\d{9}/)?.[0];
   const email = text.match(/[\w.+-]+@[\w-]+\.[\w.-]+/)?.[0];
-  const universities = ["山东大学", "青岛大学", "北京大学", "中国海洋大学", "齐鲁师范学院", "哈尔滨工业大学"].filter((u) => text.includes(u));
+  const universities = extractUniversities(text);
   const university = universities[0] || undefined;
   const major = ["计算机科学与技术", "汉语言文学", "数据科学与大数据技术", "软件工程", "视觉传达设计"].find((m) => text.includes(m));
   const graduationYear = Number(text.match(/20(2[0-9])届?/)?.[0]?.slice(0, 4)) || undefined;
