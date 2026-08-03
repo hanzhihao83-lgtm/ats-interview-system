@@ -92,7 +92,11 @@ app.use(
 );
 app.get("/api/health", (_req, res) => res.json({ success: true, data: { status: "ok" } }));
 app.use("/api/auth", authRouter);
-app.use("/api", (req, res, next) => req.path === "/webhooks/tencent-meeting" ? next() : requireAuth(req, res, next));
+app.use("/api", (req, res, next) =>
+  req.path === "/webhooks/tencent-meeting" || req.path === "/kim/status"
+    ? next()
+    : requireAuth(req, res, next),
+);
 app.use("/api", recruitmentRouter);
 app.use("/api/auto-dashboard", autoDashboardRouter);
 const send = (res: Response, status: number, body: object) =>
