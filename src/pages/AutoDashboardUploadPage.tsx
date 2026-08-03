@@ -1,4 +1,17 @@
-import { ArrowLeftOutlined } from "@ant-design/icons"; import { Button, Layout, Typography } from "antd";
+import { ArrowLeftOutlined } from "@ant-design/icons";
+import { Button, Layout, Typography } from "antd";
 import AutoDashboardUploader from "../components/auto-dashboard/AutoDashboardUploader";
 const navigate = (url: string) => { window.history.pushState({}, "", url); window.dispatchEvent(new PopStateEvent("popstate")); };
-export default function AutoDashboardUploadPage() { return <Layout className="auto-dashboard-page"><header className="auto-page-header"><div><Typography.Title level={2}>文件生成看板</Typography.Title><Typography.Text type="secondary">上传招聘 Excel，系统自动读取面试、入职和供应商数据，并生成招聘结果看板。</Typography.Text></div><Button icon={<ArrowLeftOutlined />} onClick={() => navigate("/")}>返回首页</Button></header><main className="auto-page-content"><AutoDashboardUploader onComplete={navigate} /></main></Layout>; }
+export default function AutoDashboardUploadPage() {
+  return <Layout className="auto-dashboard-page auto-upload-page">
+    <header className="auto-page-header auto-upload-page-header">
+      <div>
+        <Typography.Text className="auto-page-eyebrow">自动化工具 / 文件上传</Typography.Text>
+        <Typography.Title level={2}>生成招聘结果看板</Typography.Title>
+        <Typography.Text type="secondary">上传招聘数据文件，系统会自动完成识别、统计并生成可视化看板。</Typography.Text>
+      </div>
+      <Button icon={<ArrowLeftOutlined />} onClick={() => navigate("/")}>返回首页</Button>
+    </header>
+    <main className="auto-page-content auto-upload-content"><AutoDashboardUploader onComplete={navigate} /></main>
+  </Layout>;
+}
