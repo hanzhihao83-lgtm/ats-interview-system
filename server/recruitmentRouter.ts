@@ -20,6 +20,7 @@ import {
   ValidationStatus,
 } from "@prisma/client";
 import { prisma } from "./database.js";
+import { assertSupplierIdentity, isSupplierUser, supplierIdFor, supplierNameFor } from "./auth.js";
 
 const router = Router();
 const maxFileMb = Math.max(1, Number(process.env.MAX_IMPORT_FILE_MB || 15));
@@ -346,6 +347,17 @@ const success = (res: Response, data: unknown, status = 200) =>
     .status(status)
     .json({ success: true, data, requestId: res.locals.requestId });
 
+const taskAccessWhere = (req: Request, id?: string) => ({
+  ...(id ? { id } : {}),
+  ...(isSupplierUser(req) ? { supplierId: req.auth!.supplierId! } : {}),
+});
+async function assertTaskAccess(req: Request) {
+  const task = await prisma.candidateImportTask.findFirst({ where: taskAccessWhere(req, req.params.taskId) });
+  if (!task) throw new Error("IMPORT_TASK_NOT_FOUND");
+  return task;
+}
+const candidateScope = (req: Request) => isSupplierUser(req) ? { supplierId: req.auth!.supplierId! } : {};
+
 export async function cleanupExpiredImportFiles(retentionDays = 7) {
   const before = new Date(Date.now() - retentionDays * 86_400_000);
   const records = await prisma.importFileRecord.findMany({
@@ -385,7 +397,7 @@ async function persistSheet(
 ) {
   const task = await prisma.candidateImportTask.findUniqueOrThrow({
     where: { id: taskId },
-    include: { fileRecord: true },
+    include: { fileRecord: true, supplier: true },
   });
   const book = readWorkbook(safeFile(task));
   const sheet = book.Sheets[sheetName];
@@ -428,6 +440,7 @@ async function persistSheet(
     const mapped = Object.fromEntries(
       Object.entries(mapping).map(([field, header]) => [field, raw[header]]),
     );
+    if (task.supplier) mapped.supplier = task.supplier.name;
     return {
       rowNumber: headerIndex + index + 2,
       raw,
@@ -440,7 +453,7 @@ async function persistSheet(
     ),
   ] as string[];
   const existing = await prisma.candidate.findMany({
-    where: { deletedAt: null, normalizedName: { in: names } },
+    where: { deletedAt: null, normalizedName: { in: names }, ...(task.supplierId ? { supplierId: task.supplierId } : {}) },
     select: {
       id: true,
       normalizedName: true,
@@ -547,11 +560,12 @@ router.post(
   "/imports/candidates/upload",
   uploader.single("file"),
   wrap(async (req, res) => {
+    assertSupplierIdentity(req);
     if (!req.file) throw new Error("IMPORT_FILE_INVALID");
     const bytes = fs.readFileSync(req.file.path);
     const hash = createHash("sha256").update(bytes).digest("hex");
     const prior = await prisma.candidateImportTask.findFirst({
-      where: { fileHash: hash },
+      where: { fileHash: hash, ...taskAccessWhere(req) },
       orderBy: { uploadedAt: "desc" },
       select: { id: true, taskNo: true, status: true, uploadedAt: true },
     });
@@ -562,8 +576,9 @@ router.post(
         storedFileName: path.basename(req.file.filename),
         fileHash: hash,
         fileSize: req.file.size,
-        uploadedBy: clean(req.body.uploadedBy),
-        defaultSupplierId: clean(req.body.supplierId),
+        uploadedBy: req.auth!.name,
+        supplierId: supplierIdFor(req, clean(req.body.supplierId)) || null,
+        defaultSupplierId: supplierIdFor(req, clean(req.body.supplierId)) || null,
         defaultPositionId: clean(req.body.defaultPositionId),
         fileRecord: {
           create: {
@@ -576,7 +591,7 @@ router.post(
           create: {
             module: "候选人导入",
             action: "上传 Excel",
-            operator: clean(req.body.uploadedBy),
+            operator: req.auth!.name,
             newValue: json({
               fileName: path.basename(req.file.originalname),
               fileSize: req.file.size,
@@ -601,10 +616,7 @@ router.post(
 router.post(
   "/imports/candidates/:taskId/parse",
   wrap(async (req, res) => {
-    const task = await prisma.candidateImportTask.findUnique({
-      where: { id: req.params.taskId },
-    });
-    if (!task) throw new Error("IMPORT_TASK_NOT_FOUND");
+    const task = await assertTaskAccess(req);
     await prisma.candidateImportTask.update({
       where: { id: task.id },
       data: { status: ImportTaskStatus.PARSING },
@@ -629,6 +641,7 @@ router.post(
 router.post(
   "/imports/candidates/:taskId/select-sheet",
   wrap(async (req, res) => {
+    await assertTaskAccess(req);
     const sheetName = z.string().min(1).parse(req.body.sheetName);
     const data = await persistSheet(req.params.taskId, sheetName);
     await prisma.operationLog.create({
@@ -645,8 +658,8 @@ router.post(
 router.get(
   "/imports/candidates/:taskId/mapping",
   wrap(async (req, res) => {
-    const task = await prisma.candidateImportTask.findUnique({
-      where: { id: req.params.taskId },
+    const task = await prisma.candidateImportTask.findFirst({
+      where: taskAccessWhere(req, req.params.taskId),
       select: { id: true, sheetName: true, fieldMapping: true, status: true },
     });
     if (!task) throw new Error("IMPORT_TASK_NOT_FOUND");
@@ -665,9 +678,7 @@ router.put(
       !mapping.position
     )
       throw new Error("IMPORT_MAPPING_INVALID");
-    const task = await prisma.candidateImportTask.findUnique({
-      where: { id: req.params.taskId },
-    });
+    const task = await assertTaskAccess(req);
     if (!task?.sheetName) throw new Error("IMPORT_TASK_NOT_FOUND");
     const data = await persistSheet(task.id, task.sheetName, mapping);
     await prisma.operationLog.create({
@@ -684,6 +695,7 @@ router.put(
 router.get(
   "/imports/candidates/:taskId/preview",
   wrap(async (req, res) => {
+    await assertTaskAccess(req);
     const page = Math.max(1, Number(req.query.page || 1)),
       pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize || 20)));
     const where: Prisma.CandidateImportRowWhereInput = {
@@ -751,6 +763,7 @@ router.get(
 router.put(
   "/imports/candidates/:taskId/rows/:rowNumber",
   wrap(async (req, res) => {
+    const taskAccess = await assertTaskAccess(req);
     const row = await prisma.candidateImportRow.findUnique({
       where: {
         taskId_rowNumber: {
@@ -785,10 +798,11 @@ router.put(
         .map((key) => [key, req.body[key]]),
     );
     const data = normalizeRow({ ...oldData, ...patch });
+    if (taskAccess.supplierId) data.supplier = req.auth!.supplierName;
     const validation = validateRow(data);
     const [databaseMatches, importMatches] = await Promise.all([
       prisma.candidate.findMany({
-        where: { deletedAt: null, normalizedName: data.normalizedName || "" },
+        where: { deletedAt: null, normalizedName: data.normalizedName || "", ...(taskAccess.supplierId ? { supplierId: taskAccess.supplierId } : {}) },
         select: {
           id: true,
           phoneNormalized: true,
@@ -893,17 +907,17 @@ router.post(
         allowWarnings: z.boolean().default(false),
       })
       .parse(req.body);
+    const accessTask = await assertTaskAccess(req);
     const locked = await prisma.candidateImportTask.updateMany({
       where: {
         id: req.params.taskId,
+        ...(accessTask.supplierId ? { supplierId: accessTask.supplierId } : {}),
         status: ImportTaskStatus.WAITING_CONFIRMATION,
       },
       data: { status: ImportTaskStatus.IMPORTING, confirmedAt: new Date() },
     });
     if (!locked.count) {
-      const exists = await prisma.candidateImportTask.findUnique({
-        where: { id: req.params.taskId },
-      });
+      const exists = await prisma.candidateImportTask.findFirst({ where: taskAccessWhere(req, req.params.taskId) });
       if (!exists) throw new Error("IMPORT_TASK_NOT_FOUND");
       throw new Error("IMPORT_TASK_ALREADY_CONFIRMED");
     }
@@ -967,8 +981,9 @@ router.post(
             continue;
           }
           const data = row.normalizedData as Record<string, any>;
+          if (isSupplierUser(req)) data.supplier = req.auth!.supplierName;
           await prisma.$transaction(async (tx) => {
-            const supplier = await tx.supplier.upsert({
+            const supplier = isSupplierUser(req) ? await tx.supplier.findUniqueOrThrow({ where: { id: req.auth!.supplierId! } }) : await tx.supplier.upsert({
               where: {
                 code: `AUTO-${createHash("sha1").update(data.supplier).digest("hex").slice(0, 12)}`,
               },
@@ -999,9 +1014,7 @@ router.post(
               ) &&
               matchedIds[0]
             ) {
-              const existing = await tx.candidate.findUniqueOrThrow({
-                where: { id: matchedIds[0] },
-              });
+              const existing = await tx.candidate.findFirstOrThrow({ where: { id: matchedIds[0], ...(isSupplierUser(req) ? { supplierId: req.auth!.supplierId! } : {}) } });
               const values = {
                 name: data.name,
                 normalizedName: data.normalizedName,
@@ -1176,6 +1189,7 @@ router.get(
       pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize || 20)));
     const [rows, total] = await prisma.$transaction([
       prisma.candidateImportTask.findMany({
+        where: taskAccessWhere(req),
         orderBy: { uploadedAt: "desc" },
         skip: (page - 1) * pageSize,
         take: pageSize,
@@ -1196,7 +1210,7 @@ router.get(
           status: true,
         },
       }),
-      prisma.candidateImportTask.count(),
+      prisma.candidateImportTask.count({ where: taskAccessWhere(req) }),
     ]);
     return success(res, { rows, pagination: { page, pageSize, total } });
   }),
@@ -1204,6 +1218,7 @@ router.get(
 router.get(
   "/imports/candidates/:taskId/errors/export",
   wrap(async (req, res) => {
+    await assertTaskAccess(req);
     const rows = await prisma.candidateImportRow.findMany({
       where: {
         taskId: req.params.taskId,
@@ -1250,8 +1265,8 @@ router.get(
 router.delete(
   "/imports/candidates/:taskId/file",
   wrap(async (req, res) => {
-    const task = await prisma.candidateImportTask.findUnique({
-      where: { id: req.params.taskId },
+    const task = await prisma.candidateImportTask.findFirst({
+      where: taskAccessWhere(req, req.params.taskId),
       include: { fileRecord: true },
     });
     if (!task?.fileRecord) throw new Error("IMPORT_TASK_NOT_FOUND");
@@ -1306,10 +1321,11 @@ router.get(
   wrap(async (req, res) => {
     const page = Math.max(1, Number(req.query.page || 1)),
       pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize || 20)));
-    const where: Prisma.CandidateWhereInput = { deletedAt: null };
-    if (req.query.supplierId) where.supplierId = String(req.query.supplierId);
-    if (req.query.supplier)
-      where.supplier = { name: String(req.query.supplier) };
+    const where: Prisma.CandidateWhereInput = { deletedAt: null, ...candidateScope(req) };
+    const scopedSupplierId = supplierIdFor(req, req.query.supplierId ? String(req.query.supplierId) : null);
+    const scopedSupplierName = supplierNameFor(req, req.query.supplier ? String(req.query.supplier) : null);
+    if (scopedSupplierId) where.supplierId = scopedSupplierId;
+    else if (scopedSupplierName) where.supplier = { name: scopedSupplierName };
     if (req.query.positionId) where.positionId = String(req.query.positionId);
     if (req.query.position)
       where.position = { name: String(req.query.position) };
@@ -1359,7 +1375,7 @@ router.get(
   "/candidates/:id",
   wrap(async (req, res) => {
     const candidate = await prisma.candidate.findFirst({
-      where: { id: req.params.id, deletedAt: null },
+      where: { id: req.params.id, deletedAt: null, ...candidateScope(req) },
       select: {
         ...candidateSelect,
         statusEvents: { orderBy: { effectiveAt: "desc" } },
@@ -1392,27 +1408,30 @@ router.post(
   "/candidates",
   wrap(async (req, res) => {
     const body = candidateBody.parse(req.body);
+    assertSupplierIdentity(req);
     const phone = normalizePhone(body.phone),
       email = clean(body.email)?.toLowerCase() || null;
     const candidate = await prisma.$transaction(async (tx) => {
-      const supplier = body.supplierId
+      const forcedSupplierId = supplierIdFor(req, body.supplierId);
+      const forcedSupplierName = supplierNameFor(req, body.supplierName);
+      const supplier = forcedSupplierId
         ? await tx.supplier.findUniqueOrThrow({
-            where: { id: body.supplierId },
+            where: { id: forcedSupplierId },
           })
         : await tx.supplier.upsert({
             where: {
               code: `AUTO-${createHash("sha1")
-                .update(body.supplierName || "待补充")
+                .update(forcedSupplierName || "待补充")
                 .digest("hex")
                 .slice(0, 12)}`,
             },
-            update: { name: body.supplierName || "待补充" },
+            update: { name: forcedSupplierName || "待补充" },
             create: {
               code: `AUTO-${createHash("sha1")
-                .update(body.supplierName || "待补充")
+                .update(forcedSupplierName || "待补充")
                 .digest("hex")
                 .slice(0, 12)}`,
-              name: body.supplierName || "待补充",
+              name: forcedSupplierName || "待补充",
             },
           });
       let position = body.positionId
@@ -1477,7 +1496,7 @@ router.put(
   "/candidates/:id",
   wrap(async (req, res) => {
     const old = await prisma.candidate.findFirst({
-      where: { id: req.params.id, deletedAt: null },
+      where: { id: req.params.id, deletedAt: null, ...candidateScope(req) },
     });
     if (!old) throw new Error("CANDIDATE_NOT_FOUND");
     const body = candidateBody.partial().parse(req.body);
@@ -1495,6 +1514,7 @@ router.put(
         where: { id: old.id },
         data: {
           ...candidatePatch,
+          supplierId: isSupplierUser(req) ? req.auth!.supplierId! : candidatePatch.supplierId,
           normalizedName: body.name ? normalizeName(body.name)! : undefined,
           phone,
           phoneNormalized: phone,
@@ -1559,7 +1579,7 @@ router.delete(
   "/candidates/:id",
   wrap(async (req, res) => {
     const updated = await prisma.candidate.updateMany({
-      where: { id: req.params.id, deletedAt: null },
+      where: { id: req.params.id, deletedAt: null, ...candidateScope(req) },
       data: {
         deletedAt: new Date(),
         updatedBy: clean(req.body?.operator) || "招聘专员",
@@ -1578,11 +1598,14 @@ router.delete(
   }),
 );
 
-function dashboardWhere(query: Request["query"]): Prisma.CandidateWhereInput {
+function dashboardWhere(req: Request): Prisma.CandidateWhereInput {
+  const query = req.query;
+  const scopedSupplierId = supplierIdFor(req, query.supplierId ? String(query.supplierId) : null);
+  const scopedSupplierName = supplierNameFor(req, query.supplier ? String(query.supplier) : null);
   return {
     deletedAt: null,
-    ...(query.supplierId ? { supplierId: String(query.supplierId) } : {}),
-    ...(query.supplier ? { supplier: { name: String(query.supplier) } } : {}),
+    ...(scopedSupplierId ? { supplierId: scopedSupplierId } : {}),
+    ...(!scopedSupplierId && scopedSupplierName ? { supplier: { name: scopedSupplierName } } : {}),
     ...(query.positionId ? { positionId: String(query.positionId) } : {}),
     ...(query.position ? { position: { name: String(query.position) } } : {}),
     ...(query.projectName ? { projectName: String(query.projectName) } : {}),
@@ -1597,7 +1620,7 @@ router.get(
       start = new Date(`${selected}T00:00:00.000Z`),
       end = new Date(start);
     end.setUTCDate(end.getUTCDate() + 1);
-    const where = dashboardWhere(req.query);
+    const where = dashboardWhere(req);
     const candidatesAtDate = await prisma.candidate.findMany({
       where: { ...where, createdAt: { lt: end } },
       select: { id: true, currentStatus: true },
@@ -1653,7 +1676,7 @@ router.get(
 router.get(
   "/dashboard/funnel",
   wrap(async (req, res) => {
-    const where = dashboardWhere(req.query);
+    const where = dashboardWhere(req);
     const [submitted, screened, interviewed, passed, pending, joined] =
       await prisma.$transaction([
         prisma.candidate.count({ where }),
@@ -1687,7 +1710,7 @@ router.get(
 router.get(
   "/dashboard/vendors",
   wrap(async (req, res) => {
-    const where = dashboardWhere(req.query);
+    const where = dashboardWhere(req);
     const rows = await prisma.candidate.groupBy({
       by: ["supplierId"],
       where,
@@ -1768,7 +1791,7 @@ router.get(
 router.get(
   "/dashboard/risks",
   wrap(async (req, res) => {
-    const where = dashboardWhere(req.query);
+    const where = dashboardWhere(req);
     const [abnormal, feedback, overdue] = await prisma.$transaction([
       prisma.candidate.count({ where: { ...where, currentStatus: "异常" } }),
       prisma.candidate.count({

@@ -12,6 +12,13 @@ enum RecordStatus {
   INACTIVE
 }
 
+enum UserRole {
+  PLATFORM_ADMIN
+  INTERNAL_RECRUITER
+  SUPPLIER_ADMIN
+  SUPPLIER_RECRUITER
+}
+
 enum ImportTaskStatus {
   UPLOADED
   PARSING
@@ -55,15 +62,51 @@ enum ImportRowStatus {
 }
 
 model Supplier {
-  id         String       @id @default(cuid())
-  name       String
-  code       String       @unique
-  status     RecordStatus @default(ACTIVE)
-  createdAt  DateTime     @default(now())
-  updatedAt  DateTime     @updatedAt
-  candidates Candidate[]
+  id               String                @id @default(cuid())
+  name             String
+  code             String                @unique
+  status           RecordStatus          @default(ACTIVE)
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
+  candidates       Candidate[]
+  users            User[]
+  importTasks      CandidateImportTask[] @relation("ImportTaskSupplier")
+  importedDatasets ImportedDataset[]     @relation("ImportedDatasetSupplier")
 
   @@index([name])
+}
+
+model User {
+  id           String       @id @default(cuid())
+  email        String       @unique
+  name         String
+  passwordHash String
+  role         UserRole
+  supplierId   String?
+  status       RecordStatus @default(ACTIVE)
+  lastLoginAt  DateTime?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  supplier Supplier?     @relation(fields: [supplierId], references: [id])
+  sessions AuthSession[]
+
+  @@index([supplierId])
+  @@index([role, status])
+}
+
+model AuthSession {
+  id         String   @id @default(cuid())
+  userId     String
+  tokenHash  String   @unique
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  lastUsedAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
 }
 
 model JobPosition {
@@ -184,6 +227,7 @@ model CandidateImportTask {
   uploadedBy        String?
   defaultSupplierId String?
   defaultPositionId String?
+  supplierId        String?
   uploadedAt        DateTime             @default(now())
   confirmedAt       DateTime?
   completedAt       DateTime?
@@ -191,9 +235,11 @@ model CandidateImportTask {
   rows              CandidateImportRow[]
   logs              OperationLog[]
   fileRecord        ImportFileRecord?
+  supplier          Supplier?            @relation("ImportTaskSupplier", fields: [supplierId], references: [id])
 
   @@index([fileHash])
   @@index([uploadedAt])
+  @@index([supplierId])
 }
 
 model CandidateImportRow {
@@ -275,15 +321,18 @@ model ImportedDataset {
   warningCount     Int      @default(0)
   dashboardId      String?
   createdBy        String
+  supplierId       String?
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
   candidates ImportedCandidate[]
   suppliers  ImportedSupplierSummary[]
   dashboard  GeneratedDashboard?
+  supplier   Supplier?                 @relation("ImportedDatasetSupplier", fields: [supplierId], references: [id])
 
   @@index([fileHash])
   @@index([createdAt])
+  @@index([supplierId])
 }
 
 model ImportedCandidate {

@@ -6,10 +6,18 @@ export interface ApiResponse<T> {
   requestId?: string;
 }
 const apiBaseUrl = String(import.meta.env.VITE_API_BASE_URL || "").replace(/\/$/, "");
+export const AUTH_TOKEN_KEY = "recruitment_auth_token";
 export const apiUrl = (url: string) => `${apiBaseUrl}${url}`;
+export function authHeaders(headers?: HeadersInit) {
+  const result = new Headers(headers || {}), token = localStorage.getItem(AUTH_TOKEN_KEY);
+  if (token) result.set("Authorization", `Bearer ${token}`);
+  return result;
+}
+export const authorizedFetch = (url: string, init?: RequestInit) => fetch(apiUrl(url), { ...init, headers: authHeaders(init?.headers) });
 export async function api<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(apiUrl(url), init);
+  const response = await authorizedFetch(url, init);
   const body = (await response.json().catch(() => ({}))) as ApiResponse<T>;
+  if (response.status === 401 && url !== "/api/auth/login") window.dispatchEvent(new Event("auth:unauthorized"));
   if (!response.ok || !body.success)
     throw new Error(body.message || body.code || "请求失败");
   return body.data;
