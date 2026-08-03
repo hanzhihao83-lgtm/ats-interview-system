@@ -8,9 +8,10 @@
     "dev:web": "vite",
     "dev:server": "tsx watch server/index.ts",
     "test:server": "node server/interviewReminderService.test.mjs",
-    "test": "node --import tsx --test server/recruitmentCore.test.ts server/autoDashboardParser.test.ts server/auth.test.ts && npm run test:server",
+    "test": "node --import tsx --test server/recruitmentCore.test.ts server/autoDashboardParser.test.ts server/auth.test.ts server/dataScope.test.ts && npm run test:server",
     "test:auto-dashboard": "node --import tsx --test server/autoDashboardParser.test.ts",
     "test:rbac:smoke": "node scripts/rbacSmoke.mjs",
+    "test:business:smoke": "node --import tsx scripts/businessApiSmoke.ts",
     "build": "npm run build:web && npm run build:server",
     "build:web": "tsc -b && vite build",
     "build:server": "tsc -p tsconfig.server.json && cp server/*.mjs dist-server/server/ && node --check server/kimClient.mjs && node --check server/interviewReminderService.mjs",
@@ -22,7 +23,8 @@
     "db:seed": "prisma db seed",
     "db:studio": "prisma studio",
     "db:check": "tsx scripts/checkDatabase.ts",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "postinstall": "prisma generate"
   },
   "dependencies": {
     "@ant-design/icons": "^6.0.0",
@@ -60,6 +62,6 @@
     "vite": "^7.1.2"
   },
   "prisma": {
-    "seed": "tsx prisma/seed.ts"
+    "seed": "node --import tsx prisma/seed.ts"
   }
 }

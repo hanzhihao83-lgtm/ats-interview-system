@@ -476,3 +476,14 @@ body {
     width: 100%;
   }
 }
+.recruitment-portal { min-height: 100vh; }
+.portal-logo { height: 64px; display: flex; align-items: center; justify-content: center; color: #fff; font-size: 18px; font-weight: 700; letter-spacing: 1px; border-bottom: 1px solid rgba(255,255,255,.12); }
+.portal-header { background: #fff; padding: 0 20px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #f0f0f0; }
+.portal-content { padding: 20px; background: #f5f7fa; overflow: auto; }
+.business-page-header { margin-bottom: 18px; padding: 20px 22px; background: #fff; border: 1px solid #edf0f5; border-radius: 10px; }
+.business-page-header .ant-typography { margin-bottom: 8px; }
+.business-page-icon { font-size: 28px; color: #1677ff; margin-top: 6px; }
+.business-chart-row { margin-top: 16px; margin-bottom: 16px; }
+.table-toolbar { margin-bottom: 16px; }
+.table-toolbar .ant-input-affix-wrapper { min-width: 310px; }
+@media (max-width: 768px) { .portal-content { padding: 12px; } .table-toolbar .ant-input-affix-wrapper { min-width: 220px; } }

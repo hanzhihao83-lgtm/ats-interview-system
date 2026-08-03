@@ -48,10 +48,11 @@ export const dashboardApi = {
 };
 
 export const autoDashboardApi = {
-  upload: async (file: File, uploadedBy?: string) => {
+  upload: async (file: File, uploadedBy?: string, businessLine?: string) => {
     const form = new FormData();
     form.append("file", file);
     if (uploadedBy) form.append("uploadedBy", uploadedBy);
+    if (businessLine) form.append("businessLine", businessLine);
     return api<{ datasetId: string; dashboardId: string; processedSheets: number; candidateCount: number; supplierCount: number; warningCount: number; redirectUrl: string }>("/api/auto-dashboard/upload", { method: "POST", body: form });
   },
   detail: (id: string) => api<any>(`/api/auto-dashboard/${id}`),

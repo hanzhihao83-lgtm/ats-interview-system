@@ -9,6 +9,7 @@ import { z } from "zod";
 import { prisma } from "./database.js";
 import { parseWorkbook } from "./autoDashboardParser.js";
 import { assertSupplierIdentity, isSupplierUser } from "./auth.js";
+import { buildDataScope, parseBusinessLine } from "./dataScopeService.js";
 
 const router = Router();
 const uploadRoot = path.resolve(process.cwd(), process.env.AUTO_DASHBOARD_UPLOAD_DIR || "uploads/auto-dashboards");
@@ -34,20 +35,24 @@ const dashboardConfig = { title: "招聘结果看板", version: 1, modules: ["ov
 router.post("/upload", uploader.single("file"), wrap(async (req, res) => {
   assertSupplierIdentity(req);
   if (!req.file) throw new Error("AUTO_DASHBOARD_FILE_INVALID");
-  const body = z.object({ uploadedBy: z.string().trim().max(100).optional() }).parse(req.body);
+  const body = z.object({ uploadedBy: z.string().trim().max(100).optional(), businessLine: z.string().optional() }).parse(req.body);
+  const requestedLine = !body.businessLine || ["COMBINED", "综合"].includes(body.businessLine.toUpperCase()) ? undefined : parseBusinessLine(body.businessLine);
+  const scope = buildDataScope(req.auth!, undefined, requestedLine);
+  if (isSupplierUser(req) && req.auth!.role === "SUPPLIER_ADMIN" && !scope.businessLine) throw new Error("DATA_SCOPE_FORBIDDEN");
   const bytes = await fs.promises.readFile(req.file.path);
   const fileHash = createHash("sha256").update(bytes).digest("hex");
   const originalFileName = safeName(req.file.originalname);
   const dataset = await prisma.importedDataset.create({ data: {
     name: originalFileName.replace(/\.(xlsx|xls|csv)$/i, ""), originalFileName,
     storedFileName: safeName(req.file.filename), fileHash, status: "READING_SHEETS", progress: 15,
-    statusMessage: "正在读取工作表", createdBy: req.auth!.name, supplierId: isSupplierUser(req) ? req.auth!.supplierId : null,
+    statusMessage: "正在读取工作表", createdBy: req.auth!.name, supplierId: scope.supplierId || null, businessLine: scope.businessLine || null,
   }});
   try {
     const isCsv = path.extname(originalFileName).toLowerCase() === ".csv";
     const workbook = XLSX.read(isCsv ? bytes.toString("utf8") : bytes, { type: isCsv ? "string" : "buffer", raw: isCsv, cellDates: false, cellFormula: false, cellNF: false, cellText: true, bookVBA: false });
     await prisma.importedDataset.update({ where: { id: dataset.id }, data: { totalSheets: workbook.SheetNames.length, status: "PARSING_INTERVIEWS", progress: 35, statusMessage: "正在识别面试数据" } });
     const parsed = parseWorkbook(workbook, 10_000);
+    if (scope.businessLine) parsed.candidates.forEach((row) => { row.businessType = scope.businessLine === "VIDEO" ? "视频" : scope.businessLine === "AUDIO" ? "音频" : "未知"; });
     if (isSupplierUser(req)) {
       parsed.candidates.forEach((row) => { row.supplier = req.auth!.supplierName || "未知供应商"; });
       parsed.suppliers.forEach((row) => { row.supplier = req.auth!.supplierName || "未知供应商"; });
@@ -58,7 +63,7 @@ router.post("/upload", uploader.single("file"), wrap(async (req, res) => {
     const dashboard = await prisma.$transaction(async (tx) => {
       if (parsed.candidates.length) await tx.importedCandidate.createMany({ data: parsed.candidates.map((row) => ({ ...row, datasetId: dataset.id })) });
       if (parsed.suppliers.length) await tx.importedSupplierSummary.createMany({ data: parsed.suppliers.map((row) => ({ ...row, datasetId: dataset.id })) });
-      const generated = await tx.generatedDashboard.create({ data: { datasetId: dataset.id, name: "招聘结果看板", config: dashboardConfig } });
+      const generated = await tx.generatedDashboard.create({ data: { datasetId: dataset.id, name: scope.businessLine === "VIDEO" ? "视频招聘结果看板" : scope.businessLine === "AUDIO" ? "音频招聘结果看板" : "招聘结果看板", businessLine: scope.businessLine || null, config: dashboardConfig } });
       const suppliers = new Set([...parsed.candidates.map((row) => row.supplier), ...parsed.suppliers.map((row) => row.supplier)].filter(Boolean));
       await tx.importedDataset.update({ where: { id: dataset.id }, data: { dashboardId: generated.id, status: "COMPLETED", progress: 100, statusMessage: "文件处理完成，已生成招聘结果看板。", processedSheets: parsed.processedSheets.length, candidateCount: parsed.candidates.length, supplierCount: suppliers.size, warningCount: parsed.warningCount } });
       return generated;

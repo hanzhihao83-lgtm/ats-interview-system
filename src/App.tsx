@@ -78,6 +78,7 @@ import CandidateImportPage from "./pages/CandidateImportPage";
 import AutoDashboardUploadPage from "./pages/AutoDashboardUploadPage";
 import RecruitmentResultDashboardPage from "./pages/RecruitmentResultDashboardPage";
 import { isSupplierRole, roleLabels, useAuth } from "./auth/AuthContext";
+import { canAccessBusinessLine, canAccessCombinedRecruitment } from "./config/menuPermissions";
 
 class ImportPageErrorBoundary extends Component<
   { children: ReactNode },
@@ -543,6 +544,9 @@ export default function App() {
         </div>
         <Space wrap>
           <Tag color="blue">{user?.supplierName || (user ? roleLabels[user.role] : "")}</Tag>
+          {user && canAccessCombinedRecruitment(user.role) && <Button onClick={() => { history.pushState({}, "", "/dashboard"); dispatchEvent(new PopStateEvent("popstate")); }}>综合招聘</Button>}
+          {user && canAccessBusinessLine(user.role, "VIDEO") && <Button onClick={() => { history.pushState({}, "", "/video/dashboard"); dispatchEvent(new PopStateEvent("popstate")); }}>视频招聘</Button>}
+          {user && canAccessBusinessLine(user.role, "AUDIO") && <Button onClick={() => { history.pushState({}, "", "/audio/dashboard"); dispatchEvent(new PopStateEvent("popstate")); }}>音频招聘</Button>}
           {user && ["PLATFORM_ADMIN", "SUPPLIER_ADMIN"].includes(user.role) && <Button icon={<SettingOutlined />} onClick={() => { history.pushState({}, "", "/admin/users"); window.dispatchEvent(new PopStateEvent("popstate")); }}>账号管理</Button>}
           <Button
             icon={<FileSearchOutlined />}

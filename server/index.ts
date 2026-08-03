@@ -21,10 +21,12 @@ import recruitmentRouter, {
 } from "./recruitmentRouter.js";
 import autoDashboardRouter from "./autoDashboardRouter.js";
 import authRouter from "./authRouter.js";
+import businessRouter from "./businessRouter.js";
 import { isSupplierUser, requireAuth, requireRoles } from "./auth.js";
 import { UserRole } from "@prisma/client";
 import { assertDatabaseConnection, prisma } from "./database.js";
 import { ensureBootstrapAdmin } from "./bootstrap.js";
+import { ScopeForbiddenError, writeScopeAudit } from "./dataScopeService.js";
 type Store = {
   interviews: Record<string, any>[];
   tasks: Record<string, any>[];
@@ -97,6 +99,7 @@ app.use("/api", (req, res, next) =>
     ? next()
     : requireAuth(req, res, next),
 );
+app.use("/api", businessRouter);
 app.use("/api", recruitmentRouter);
 app.use("/api/auto-dashboard", autoDashboardRouter);
 const send = (res: Response, status: number, body: object) =>
@@ -415,11 +418,13 @@ app.post("/api/webhooks/tencent-meeting", (req, res) => {
 app.use(
   (
     error: unknown,
-    _req: express.Request,
+    req: express.Request,
     res: express.Response,
     _next: express.NextFunction,
   ) => {
     const raw = error instanceof Error ? error.message : "INTERNAL_ERROR";
+    if (error instanceof ScopeForbiddenError && !error.audited)
+      void writeScopeAudit(req, "API", req.params?.id ? String(req.params.id) : undefined, { supplierId: req.query.supplierId ? String(req.query.supplierId) : undefined, businessLine: req.query.businessLine ? String(req.query.businessLine) : undefined }, error.reason);
     const known = new Set([
       "DATABASE_UNAVAILABLE",
       "IMPORT_FILE_INVALID",
@@ -439,6 +444,10 @@ app.use(
       "AUTO_DASHBOARD_NO_DATA",
       "AUTO_DASHBOARD_NOT_FOUND",
       "AUTH_SUPPLIER_REQUIRED",
+      "DATA_SCOPE_FORBIDDEN",
+      "APPLICATION_NOT_FOUND",
+      "APPLICATION_CANDIDATE_REQUIRED",
+      "INTERVIEW_NOT_FOUND",
     ]);
     const multerTooLarge = raw === "File too large";
     const code = multerTooLarge
@@ -452,7 +461,7 @@ app.use(
       ? 404
       : code === "IMPORT_TASK_ALREADY_CONFIRMED"
         ? 409
-        : code === "AUTH_SUPPLIER_REQUIRED"
+        : code === "AUTH_SUPPLIER_REQUIRED" || code === "DATA_SCOPE_FORBIDDEN"
           ? 403
         : code === "DATABASE_UNAVAILABLE"
           ? 503
@@ -484,6 +493,10 @@ app.use(
             AUTO_DASHBOARD_NO_DATA: "工作表中没有可用于生成看板的数据",
             AUTO_DASHBOARD_NOT_FOUND: "招聘结果看板不存在",
             AUTH_SUPPLIER_REQUIRED: "供应商账号尚未绑定供应商",
+            DATA_SCOPE_FORBIDDEN: "当前账号无权访问该供应商或业务部门数据",
+            APPLICATION_NOT_FOUND: "应聘记录不存在或不在当前数据范围内",
+            APPLICATION_CANDIDATE_REQUIRED: "创建应聘记录需要候选人姓名和岗位",
+            INTERVIEW_NOT_FOUND: "面试记录不存在或不在当前数据范围内",
             INTERNAL_ERROR: "服务暂时不可用，请稍后重试",
           } as Record<string, string>
         )[code] || "请求失败",

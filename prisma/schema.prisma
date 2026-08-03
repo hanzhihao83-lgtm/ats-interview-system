@@ -14,9 +14,20 @@ enum RecordStatus {
 
 enum UserRole {
   PLATFORM_ADMIN
+  DEPARTMENT_MANAGER
   INTERNAL_RECRUITER
+  VIDEO_RECRUITER
+  AUDIO_RECRUITER
   SUPPLIER_ADMIN
+  SUPPLIER_VIDEO_RECRUITER
+  SUPPLIER_AUDIO_RECRUITER
   SUPPLIER_RECRUITER
+}
+
+enum BusinessLine {
+  VIDEO
+  AUDIO
+  UNCLASSIFIED
 }
 
 enum ImportTaskStatus {
@@ -62,16 +73,18 @@ enum ImportRowStatus {
 }
 
 model Supplier {
-  id               String                @id @default(cuid())
+  id               String                 @id @default(cuid())
   name             String
-  code             String                @unique
-  status           RecordStatus          @default(ACTIVE)
-  createdAt        DateTime              @default(now())
-  updatedAt        DateTime              @updatedAt
+  code             String                 @unique
+  status           RecordStatus           @default(ACTIVE)
+  createdAt        DateTime               @default(now())
+  updatedAt        DateTime               @updatedAt
   candidates       Candidate[]
+  applications     CandidateApplication[]
+  interviews       Interview[]
   users            User[]
-  importTasks      CandidateImportTask[] @relation("ImportTaskSupplier")
-  importedDatasets ImportedDataset[]     @relation("ImportedDatasetSupplier")
+  importTasks      CandidateImportTask[]  @relation("ImportTaskSupplier")
+  importedDatasets ImportedDataset[]      @relation("ImportedDatasetSupplier")
 
   @@index([name])
 }
@@ -110,21 +123,22 @@ model AuthSession {
 }
 
 model JobPosition {
-  id          String       @id @default(cuid())
-  name        String
-  projectName String?
-  department  String?
-  status      RecordStatus @default(ACTIVE)
-  createdAt   DateTime     @default(now())
-  updatedAt   DateTime     @updatedAt
-  candidates  Candidate[]
+  id           String                 @id @default(cuid())
+  name         String
+  projectName  String?
+  department   String?
+  status       RecordStatus           @default(ACTIVE)
+  createdAt    DateTime               @default(now())
+  updatedAt    DateTime               @updatedAt
+  candidates   Candidate[]
+  applications CandidateApplication[]
 
   @@index([name])
 }
 
 model Candidate {
-  id                   String                 @id @default(cuid())
-  candidateNo          String                 @unique
+  id                   String                    @id @default(cuid())
+  candidateNo          String                    @unique
   name                 String
   normalizedName       String
   phone                String?
@@ -150,17 +164,19 @@ model Candidate {
   leaveDate            DateTime?
   remark               String?
   source               String?
-  createdAt            DateTime               @default(now())
+  createdAt            DateTime                  @default(now())
   createdBy            String?
-  updatedAt            DateTime               @updatedAt
+  updatedAt            DateTime                  @updatedAt
   updatedBy            String?
   deletedAt            DateTime?
-  supplier             Supplier               @relation(fields: [supplierId], references: [id])
-  position             JobPosition            @relation(fields: [positionId], references: [id])
+  supplier             Supplier                  @relation(fields: [supplierId], references: [id])
+  position             JobPosition               @relation(fields: [positionId], references: [id])
   statusEvents         CandidateStatusEvent[]
   interviews           Interview[]
   operationLogs        OperationLog[]
   importRows           CandidateImportRow[]
+  applications         CandidateApplication[]
+  screeningResults     AIResumeScreeningResult[]
 
   @@index([normalizedName])
   @@index([phoneNormalized])
@@ -169,6 +185,41 @@ model Candidate {
   @@index([positionId])
   @@index([currentStatus])
   @@index([resumeSubmitDate])
+}
+
+model CandidateApplication {
+  id                String       @id @default(cuid())
+  applicationNo     String       @unique
+  candidateId       String
+  supplierId        String
+  businessLine      BusinessLine
+  positionId        String?
+  projectName       String?
+  currentStatus     String
+  resumeResult      String?
+  interviewResult   String?
+  expectedEntryDate DateTime?
+  actualEntryDate   DateTime?
+  businessData      Json?
+  createdById       String?
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+  deletedAt         DateTime?
+
+  candidate        Candidate                 @relation(fields: [candidateId], references: [id])
+  supplier         Supplier                  @relation(fields: [supplierId], references: [id])
+  position         JobPosition?              @relation(fields: [positionId], references: [id])
+  interviews       Interview[]
+  screeningResults AIResumeScreeningResult[]
+  kimNotifications KimNotificationLog[]
+  meetingRecords   TencentMeetingRecord[]
+
+  @@index([candidateId])
+  @@index([supplierId])
+  @@index([businessLine])
+  @@index([supplierId, businessLine])
+  @@index([businessLine, currentStatus])
+  @@index([supplierId, businessLine, currentStatus])
 }
 
 model CandidateStatusEvent {
@@ -185,9 +236,12 @@ model CandidateStatusEvent {
 }
 
 model Interview {
-  id                 String    @id @default(cuid())
+  id                 String                 @id @default(cuid())
   candidateId        String
-  round              Int       @default(1)
+  applicationId      String?
+  supplierId         String?
+  businessLine       BusinessLine?
+  round              Int                    @default(1)
   roundName          String?
   interviewer        String?
   scheduledStartTime DateTime
@@ -198,11 +252,17 @@ model Interview {
   meetingId          String?
   meetingUrl         String?
   feedback           String?
-  createdAt          DateTime  @default(now())
-  updatedAt          DateTime  @updatedAt
-  candidate          Candidate @relation(fields: [candidateId], references: [id])
+  createdAt          DateTime               @default(now())
+  updatedAt          DateTime               @updatedAt
+  candidate          Candidate              @relation(fields: [candidateId], references: [id])
+  application        CandidateApplication?  @relation(fields: [applicationId], references: [id])
+  supplier           Supplier?              @relation(fields: [supplierId], references: [id])
+  kimNotifications   KimNotificationLog[]
+  meetingRecords     TencentMeetingRecord[]
 
   @@index([candidateId])
+  @@index([applicationId])
+  @@index([supplierId, businessLine])
   @@index([scheduledStartTime])
 }
 
@@ -228,6 +288,7 @@ model CandidateImportTask {
   defaultSupplierId String?
   defaultPositionId String?
   supplierId        String?
+  businessLine      BusinessLine?
   uploadedAt        DateTime             @default(now())
   confirmedAt       DateTime?
   completedAt       DateTime?
@@ -240,6 +301,7 @@ model CandidateImportTask {
   @@index([fileHash])
   @@index([uploadedAt])
   @@index([supplierId])
+  @@index([businessLine])
 }
 
 model CandidateImportRow {
@@ -274,22 +336,27 @@ model CandidateImportRow {
 }
 
 model OperationLog {
-  id           String               @id @default(cuid())
-  module       String
-  action       String
-  candidateId  String?
-  importTaskId String?
-  oldValue     Json?
-  newValue     Json?
-  operator     String?
-  reason       String?
-  operatedAt   DateTime             @default(now())
-  candidate    Candidate?           @relation(fields: [candidateId], references: [id])
-  importTask   CandidateImportTask? @relation(fields: [importTaskId], references: [id])
+  id            String               @id @default(cuid())
+  module        String
+  action        String
+  candidateId   String?
+  importTaskId  String?
+  applicationId String?
+  supplierId    String?
+  businessLine  BusinessLine?
+  oldValue      Json?
+  newValue      Json?
+  operator      String?
+  reason        String?
+  operatedAt    DateTime             @default(now())
+  candidate     Candidate?           @relation(fields: [candidateId], references: [id])
+  importTask    CandidateImportTask? @relation(fields: [importTaskId], references: [id])
 
   @@index([candidateId])
   @@index([importTaskId])
   @@index([operatedAt])
+  @@index([applicationId])
+  @@index([supplierId, businessLine])
 }
 
 model ImportFileRecord {
@@ -306,24 +373,25 @@ model ImportFileRecord {
 }
 
 model ImportedDataset {
-  id               String   @id @default(cuid())
+  id               String        @id @default(cuid())
   name             String
   originalFileName String
   storedFileName   String
   fileHash         String
   status           String
-  progress         Int      @default(0)
+  progress         Int           @default(0)
   statusMessage    String?
-  totalSheets      Int      @default(0)
-  processedSheets  Int      @default(0)
-  candidateCount   Int      @default(0)
-  supplierCount    Int      @default(0)
-  warningCount     Int      @default(0)
+  totalSheets      Int           @default(0)
+  processedSheets  Int           @default(0)
+  candidateCount   Int           @default(0)
+  supplierCount    Int           @default(0)
+  warningCount     Int           @default(0)
   dashboardId      String?
   createdBy        String
   supplierId       String?
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  businessLine     BusinessLine?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
 
   candidates ImportedCandidate[]
   suppliers  ImportedSupplierSummary[]
@@ -333,6 +401,7 @@ model ImportedDataset {
   @@index([fileHash])
   @@index([createdAt])
   @@index([supplierId])
+  @@index([businessLine])
 }
 
 model ImportedCandidate {
@@ -392,12 +461,99 @@ model ImportedSupplierSummary {
 }
 
 model GeneratedDashboard {
-  id        String   @id @default(cuid())
-  datasetId String   @unique
-  name      String
-  config    Json
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id           String        @id @default(cuid())
+  datasetId    String        @unique
+  name         String
+  businessLine BusinessLine?
+  config       Json
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
 
   dataset ImportedDataset @relation(fields: [datasetId], references: [id], onDelete: Cascade)
+
+  @@index([businessLine])
+}
+
+model AIResumeScreeningResult {
+  id                 String       @id @default(cuid())
+  candidateId        String
+  applicationId      String
+  businessLine       BusinessLine
+  jobId              String?
+  score              Int
+  matchedPoints      Json
+  missingPoints      Json
+  riskPoints         Json
+  interviewQuestions Json
+  recommendedLevel   String?
+  confidence         Float?
+  promptVersion      String?
+  createdAt          DateTime     @default(now())
+
+  candidate   Candidate            @relation(fields: [candidateId], references: [id])
+  application CandidateApplication @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+
+  @@index([applicationId])
+  @@index([businessLine])
+}
+
+model KimNotificationLog {
+  id             String       @id @default(cuid())
+  applicationId  String
+  interviewId    String?
+  supplierId     String
+  businessLine   BusinessLine
+  status         String
+  messageSummary String?
+  errorMessage   String?
+  createdAt      DateTime     @default(now())
+
+  application CandidateApplication @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  interview   Interview?           @relation(fields: [interviewId], references: [id])
+
+  @@index([applicationId])
+  @@index([supplierId, businessLine])
+  @@index([interviewId])
+}
+
+model TencentMeetingRecord {
+  id            String       @id @default(cuid())
+  applicationId String
+  interviewId   String?
+  supplierId    String
+  businessLine  BusinessLine
+  meetingCode   String?
+  meetingUrl    String?
+  providerId    String?
+  status        String
+  interviewer   String?
+  scheduledAt   DateTime?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  application CandidateApplication @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  interview   Interview?           @relation(fields: [interviewId], references: [id])
+
+  @@index([applicationId])
+  @@index([supplierId, businessLine])
+  @@index([interviewId])
+  @@index([scheduledAt])
+}
+
+model AuditLog {
+  id             String   @id @default(cuid())
+  userId         String?
+  action         String
+  resourceType   String
+  resourceId     String?
+  requestedScope Json?
+  effectiveScope Json?
+  result         String
+  reason         String?
+  requestId      String?
+  createdAt      DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([resourceType, resourceId])
+  @@index([result, createdAt])
 }

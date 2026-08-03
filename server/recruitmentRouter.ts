@@ -13,6 +13,7 @@ import XLSX from "xlsx";
 import { z } from "zod";
 import {
   DuplicateLevel,
+  BusinessLine,
   HandlingAction,
   ImportRowStatus,
   ImportTaskStatus,
@@ -21,6 +22,8 @@ import {
 } from "@prisma/client";
 import { prisma } from "./database.js";
 import { assertSupplierIdentity, isSupplierUser, supplierIdFor, supplierNameFor } from "./auth.js";
+import { buildDataScope, parseBusinessLine } from "./dataScopeService.js";
+import { classifyBusinessLine } from "./importClassificationService.js";
 
 const router = Router();
 const maxFileMb = Math.max(1, Number(process.env.MAX_IMPORT_FILE_MB || 15));
@@ -562,6 +565,12 @@ router.post(
   wrap(async (req, res) => {
     assertSupplierIdentity(req);
     if (!req.file) throw new Error("IMPORT_FILE_INVALID");
+    const requestedLine = ["", "COMBINED", "综合"].includes(String(req.body.businessLine || "").trim().toUpperCase())
+      ? undefined
+      : parseBusinessLine(req.body.businessLine);
+    const importScope = buildDataScope(req.auth!, clean(req.body.supplierId), requestedLine);
+    if (isSupplierUser(req) && req.auth!.role === "SUPPLIER_ADMIN" && !importScope.businessLine)
+      throw new Error("DATA_SCOPE_FORBIDDEN");
     const bytes = fs.readFileSync(req.file.path);
     const hash = createHash("sha256").update(bytes).digest("hex");
     const prior = await prisma.candidateImportTask.findFirst({
@@ -577,8 +586,9 @@ router.post(
         fileHash: hash,
         fileSize: req.file.size,
         uploadedBy: req.auth!.name,
-        supplierId: supplierIdFor(req, clean(req.body.supplierId)) || null,
-        defaultSupplierId: supplierIdFor(req, clean(req.body.supplierId)) || null,
+        supplierId: importScope.supplierId || null,
+        businessLine: importScope.businessLine || null,
+        defaultSupplierId: importScope.supplierId || null,
         defaultPositionId: clean(req.body.defaultPositionId),
         fileRecord: {
           create: {
@@ -1107,6 +1117,23 @@ router.post(
                 remark: "Excel 批量导入",
               },
             });
+            const detectedBusinessLine = classifyBusinessLine(accessTask.sheetName, data.position, accessTask.businessLine);
+            const application = await tx.candidateApplication.create({
+              data: {
+                applicationNo: `APP-${detectedBusinessLine}-${Date.now()}-${randomBytes(3).toString("hex")}`,
+                candidateId: candidate!.id,
+                supplierId: supplier.id,
+                businessLine: detectedBusinessLine,
+                positionId: position.id,
+                projectName: data.projectName,
+                currentStatus: data.currentStatus,
+                resumeResult: data.resumeResult,
+                expectedEntryDate: asDate(data.expectedEntryDate),
+                actualEntryDate: asDate(data.actualEntryDate),
+                createdById: req.auth!.id,
+                businessData: detectedBusinessLine === BusinessLine.UNCLASSIFIED ? json({ classificationStatus: "待归类", sourceSheet: accessTask.sheetName }) : undefined,
+              },
+            });
             await tx.operationLog.create({
               data: {
                 module: "候选人",
@@ -1117,6 +1144,9 @@ router.post(
                       ? "合并候选人"
                       : "更新候选人",
                 candidateId: candidate!.id,
+                applicationId: application.id,
+                supplierId: supplier.id,
+                businessLine: detectedBusinessLine,
                 importTaskId: row.taskId,
                 operator: body.operator,
                 newValue: json({

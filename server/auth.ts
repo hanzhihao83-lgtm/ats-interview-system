@@ -19,7 +19,12 @@ declare global {
 }
 
 const SESSION_DAYS = Math.max(1, Number(process.env.AUTH_SESSION_DAYS || 7));
-export const supplierRoles = new Set<UserRole>(["SUPPLIER_ADMIN", "SUPPLIER_RECRUITER"]);
+export const supplierRoles = new Set<UserRole>([
+  "SUPPLIER_ADMIN",
+  "SUPPLIER_VIDEO_RECRUITER",
+  "SUPPLIER_AUDIO_RECRUITER",
+  "SUPPLIER_RECRUITER",
+]);
 export const isSupplierUser = (req: Request) => Boolean(req.auth && supplierRoles.has(req.auth.role));
 export const hashToken = (token: string) => createHash("sha256").update(token).digest("hex");
 
