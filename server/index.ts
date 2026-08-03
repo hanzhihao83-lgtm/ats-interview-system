@@ -20,7 +20,11 @@ import recruitmentRouter, {
   cleanupExpiredImportFiles,
 } from "./recruitmentRouter.js";
 import autoDashboardRouter from "./autoDashboardRouter.js";
+import authRouter from "./authRouter.js";
+import { isSupplierUser, requireAuth, requireRoles } from "./auth.js";
+import { UserRole } from "@prisma/client";
 import { assertDatabaseConnection, prisma } from "./database.js";
+import { ensureBootstrapAdmin } from "./bootstrap.js";
 type Store = {
   interviews: Record<string, any>[];
   tasks: Record<string, any>[];
@@ -55,7 +59,7 @@ const allowedOrigins = (process.env.FRONTEND_ORIGIN || "http://localhost:5173")
   .split(",")
   .map((origin) => origin.trim().replace(/\/$/, ""))
   .filter(Boolean);
-app.use(cors({ origin: (origin, callback) => callback(null, !origin || allowedOrigins.includes(origin.replace(/\/$/, ""))) }));
+app.use(cors({ origin: (origin, callback) => callback(null, !origin || allowedOrigins.includes(origin.replace(/\/$/, ""))), allowedHeaders: ["Content-Type", "Authorization", "X-Request-Id"] }));
 app.use(express.json({ limit: "1mb" }));
 app.use((req, res, next) => {
   const requestId = String(req.headers["x-request-id"] || randomUUID());
@@ -86,6 +90,9 @@ app.use(
     next();
   },
 );
+app.get("/api/health", (_req, res) => res.json({ success: true, data: { status: "ok" } }));
+app.use("/api/auth", authRouter);
+app.use("/api", (req, res, next) => req.path === "/webhooks/tencent-meeting" ? next() : requireAuth(req, res, next));
 app.use("/api", recruitmentRouter);
 app.use("/api/auto-dashboard", autoDashboardRouter);
 const send = (res: Response, status: number, body: object) =>
@@ -100,6 +107,11 @@ const addTasks = (tasks: Record<string, unknown>[]) => {
   });
 };
 const meetingClient = createTencentMeetingClient();
+const interviewSupplier = (item: Record<string, any>) => item.supplierName || item.supplier || item.vendor || null;
+const canAccessInterview = (req: express.Request, item: Record<string, any>) =>
+  !isSupplierUser(req) || interviewSupplier(item) === req.auth?.supplierName;
+const findVisibleInterview = (req: express.Request, id: string) =>
+  store.interviews.find((item) => item.id === id && canAccessInterview(req, item));
 const conflict = (
   interviewerId: string,
   start: string,
@@ -126,11 +138,15 @@ app.get("/api/kim/status", (_req, res) =>
     message: createKimClient().configured ? "Kim已配置" : "Kim机器人尚未配置",
   }),
 );
-app.get("/api/interviews", (_req, res) =>
-  send(res, 200, { success: true, data: store.interviews, tasks: store.tasks }),
+app.get("/api/interviews", (req, res) =>
+  send(res, 200, { success: true, data: store.interviews.filter((item) => canAccessInterview(req, item)), tasks: store.tasks.filter((task) => !isSupplierUser(req) || interviewSupplier(task) === req.auth?.supplierName) }),
 );
-app.get("/api/interview-reminders", (_req, res) =>
-  send(res, 200, { success: true, data: store.tasks }),
+app.get("/api/interview-reminders", (req, res) =>
+  send(res, 200, { success: true, data: store.tasks.filter((task) => {
+    if (!isSupplierUser(req)) return true;
+    const interview = store.interviews.find((item) => item.id === task.interviewId);
+    return Boolean(interview && canAccessInterview(req, interview));
+  }) }),
 );
 app.get("/api/tencent-meeting/status", async (_req, res) =>
   send(res, 200, { success: true, data: await meetingClient.testConnection() }),
@@ -167,6 +183,7 @@ app.post("/api/tencent-meeting/test", async (_req, res) =>
 app.post("/api/interviews", (req, res) => {
   const interview = {
     ...req.body,
+    ...(isSupplierUser(req) ? { supplierId: req.auth?.supplierId, supplierName: req.auth?.supplierName, supplier: req.auth?.supplierName, vendor: req.auth?.supplierName } : {}),
     id: req.body.id || `INT-${Date.now()}`,
     status: req.body.status || "已安排",
     result: req.body.result || "待反馈",
@@ -190,7 +207,7 @@ app.post("/api/interviews", (req, res) => {
   });
 });
 app.post("/api/interviews/:id/create-meeting", async (req, res) => {
-  const interview = store.interviews.find((item) => item.id === req.params.id);
+  const interview = findVisibleInterview(req, req.params.id);
   if (!interview)
     return send(res, 404, {
       success: false,
@@ -255,16 +272,17 @@ app.post("/api/interviews/:id/create-meeting", async (req, res) => {
     });
   }
 });
-app.get("/api/interviews/:id/participants", (req, res) =>
-  send(res, 200, {
+app.get("/api/interviews/:id/participants", (req, res) => {
+  if (!findVisibleInterview(req, req.params.id)) return send(res, 404, { success: false, code: "INTERVIEW_NOT_FOUND", message: "面试不存在" });
+  return send(res, 200, {
     success: true,
     data: store.participants.filter(
       (item) => item.interviewId === req.params.id,
     ),
-  }),
-);
+  });
+});
 app.post("/api/interviews/:id/sync-participants", async (req, res) => {
-  const interview = store.interviews.find((item) => item.id === req.params.id);
+  const interview = findVisibleInterview(req, req.params.id);
   if (!interview?.tencentMeeting?.meetingId)
     return send(res, 400, {
       success: false,
@@ -280,14 +298,15 @@ app.post("/api/interviews/:id/sync-participants", async (req, res) => {
   save();
   return send(res, 200, { success: true, data });
 });
-app.get("/api/interviews/:id/recordings", (req, res) =>
-  send(res, 200, {
+app.get("/api/interviews/:id/recordings", (req, res) => {
+  if (!findVisibleInterview(req, req.params.id)) return send(res, 404, { success: false, code: "INTERVIEW_NOT_FOUND", message: "面试不存在" });
+  return send(res, 200, {
     success: true,
     data: store.recordings.filter((item) => item.interviewId === req.params.id),
-  }),
-);
+  });
+});
 app.post("/api/interviews/:id/sync-recordings", async (req, res) => {
-  const interview = store.interviews.find((item) => item.id === req.params.id);
+  const interview = findVisibleInterview(req, req.params.id);
   if (!interview?.tencentMeeting?.meetingId)
     return send(res, 400, {
       success: false,
@@ -309,7 +328,7 @@ app.post("/api/interviews/:id/sync-recordings", async (req, res) => {
   save();
   return send(res, 200, { success: true, data });
 });
-app.post("/api/kim/interview-reminders/test", async (req, res) => {
+app.post("/api/kim/interview-reminders/test", requireRoles(UserRole.PLATFORM_ADMIN, UserRole.INTERNAL_RECRUITER), async (req, res) => {
   const result = await createKimClient().sendMessage(
     { webhookUrl: req.body.webhookUrl },
     {
@@ -325,7 +344,7 @@ app.post("/api/kim/interview-reminders/test", async (req, res) => {
     requestId: result.requestId,
   });
 });
-app.post("/api/interview-reminders/scan", async (_req, res) => {
+app.post("/api/interview-reminders/scan", requireRoles(UserRole.PLATFORM_ADMIN, UserRole.INTERNAL_RECRUITER), async (_req, res) => {
   await scanAndSendInterviewReminders(store);
   save();
   return send(res, 200, {
@@ -334,7 +353,7 @@ app.post("/api/interview-reminders/scan", async (_req, res) => {
   });
 });
 app.post("/api/interviews/:id/cancel", (req, res) => {
-  const interview = store.interviews.find((item) => item.id === req.params.id);
+  const interview = findVisibleInterview(req, req.params.id);
   if (!interview)
     return send(res, 404, {
       success: false,
@@ -415,6 +434,7 @@ app.use(
       "AUTO_DASHBOARD_NO_RECOGNIZED_SHEETS",
       "AUTO_DASHBOARD_NO_DATA",
       "AUTO_DASHBOARD_NOT_FOUND",
+      "AUTH_SUPPLIER_REQUIRED",
     ]);
     const multerTooLarge = raw === "File too large";
     const code = multerTooLarge
@@ -428,6 +448,8 @@ app.use(
       ? 404
       : code === "IMPORT_TASK_ALREADY_CONFIRMED"
         ? 409
+        : code === "AUTH_SUPPLIER_REQUIRED"
+          ? 403
         : code === "DATABASE_UNAVAILABLE"
           ? 503
           : code === "INTERNAL_ERROR"
@@ -457,6 +479,7 @@ app.use(
             AUTO_DASHBOARD_NO_RECOGNIZED_SHEETS: "所有工作表均为空或无法识别",
             AUTO_DASHBOARD_NO_DATA: "工作表中没有可用于生成看板的数据",
             AUTO_DASHBOARD_NOT_FOUND: "招聘结果看板不存在",
+            AUTH_SUPPLIER_REQUIRED: "供应商账号尚未绑定供应商",
             INTERNAL_ERROR: "服务暂时不可用，请稍后重试",
           } as Record<string, string>
         )[code] || "请求失败",
@@ -466,6 +489,7 @@ app.use(
 );
 const port = Number(process.env.PORT || process.env.SERVER_PORT || 3001);
 assertDatabaseConnection()
+  .then(ensureBootstrapAdmin)
   .then(() =>
     app.listen(port, () =>
       console.log(`招聘服务已启动：http://localhost:${port}`),

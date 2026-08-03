@@ -13,6 +13,8 @@ services:
           property: connectionString
       - key: NODE_VERSION
         value: 22.22.0
+      - key: BOOTSTRAP_ADMIN_EMAIL
+        value: admin@recruitment.local
       - key: FRONTEND_ORIGIN
         value: https://ats-interview-system.vercel.app
       - key: UPLOAD_DIR

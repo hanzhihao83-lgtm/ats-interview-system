@@ -39,6 +39,8 @@ import {
   UploadOutlined,
   ReloadOutlined,
   SearchOutlined,
+  SettingOutlined,
+  LogoutOutlined,
 } from "@ant-design/icons";
 import dayjs, { Dayjs } from "dayjs";
 import ReactECharts from "echarts-for-react";
@@ -47,7 +49,7 @@ import type {
   CandidateStatus,
   OperationLog,
 } from "./types/recruitment";
-import { api, apiUrl, dashboardApi } from "./api/backend";
+import { api, authorizedFetch, dashboardApi } from "./api/backend";
 import {
   allowedStatusTransitions,
   canTransitionStatus,
@@ -75,6 +77,7 @@ import InterviewBookingButton from "./components/InterviewBookingButton";
 import CandidateImportPage from "./pages/CandidateImportPage";
 import AutoDashboardUploadPage from "./pages/AutoDashboardUploadPage";
 import RecruitmentResultDashboardPage from "./pages/RecruitmentResultDashboardPage";
+import { isSupplierRole, roleLabels, useAuth } from "./auth/AuthContext";
 
 class ImportPageErrorBoundary extends Component<
   { children: ReactNode },
@@ -171,6 +174,7 @@ const toCandidate = (row: any): Candidate => ({
 });
 
 export default function App() {
+  const { user, logout } = useAuth();
   const [pathname, setPathname] = useState(window.location.pathname);
   const [date, setDate] = useState<Dayjs>(dayjs());
   const [vendor, setVendor] = useState("全部供应商");
@@ -205,6 +209,7 @@ export default function App() {
     "candidate",
   );
   const dateText = date.format("YYYY-MM-DD");
+  const visibleVendors = isSupplierRole(user?.role) && user?.supplierName ? [user.supplierName] : vendors;
   const loadCandidates = useCallback(
     async (page = 1) => {
       const params = new URLSearchParams({
@@ -265,6 +270,7 @@ export default function App() {
     window.addEventListener("popstate", onLocation);
     return () => window.removeEventListener("popstate", onLocation);
   }, []);
+  useEffect(() => { if (isSupplierRole(user?.role) && user?.supplierName) setVendor(user.supplierName); }, [user]);
   if (pathname === "/auto-dashboard/upload") return <AutoDashboardUploadPage />;
   const autoDashboardMatch = pathname.match(/^\/dashboards\/([^/]+)$/);
   if (autoDashboardMatch) return <RecruitmentResultDashboardPage dashboardId={autoDashboardMatch[1]} />;
@@ -536,6 +542,8 @@ export default function App() {
           </Typography.Text>
         </div>
         <Space wrap>
+          <Tag color="blue">{user?.supplierName || (user ? roleLabels[user.role] : "")}</Tag>
+          {user && ["PLATFORM_ADMIN", "SUPPLIER_ADMIN"].includes(user.role) && <Button icon={<SettingOutlined />} onClick={() => { history.pushState({}, "", "/admin/users"); window.dispatchEvent(new PopStateEvent("popstate")); }}>账号管理</Button>}
           <Button
             icon={<FileSearchOutlined />}
             onClick={() => setScreeningOpen(true)}
@@ -572,6 +580,7 @@ export default function App() {
           >
             导出 Excel
           </Button>
+          <Button icon={<LogoutOutlined />} onClick={() => void logout()}>退出</Button>
         </Space>
       </Header>
       <Content className="content">
@@ -591,7 +600,7 @@ export default function App() {
             />
             <Select
               value={vendor}
-              options={vendors.map((v) => ({ label: v, value: v }))}
+              options={visibleVendors.map((v) => ({ label: v, value: v }))}
               onChange={setVendor}
               style={{ width: 140 }}
             />
@@ -905,7 +914,7 @@ function KimStatusPanel() {
     message: string;
   } | null>(null);
   useEffect(() => {
-    fetch(apiUrl("/api/kim/status"))
+    authorizedFetch("/api/kim/status")
       .then((res) => res.json())
       .then(setStatus)
       .catch(() => setStatus({ configured: false, message: "Kim服务未启动" }));
@@ -933,7 +942,7 @@ function KimStatusPanel() {
         <Divider />
         <Button
           onClick={() =>
-            fetch(apiUrl("/api/interview-reminders/scan"), { method: "POST" })
+            authorizedFetch("/api/interview-reminders/scan", { method: "POST" })
               .then(() => message.success("已触发提醒扫描"))
               .catch(() => message.error("提醒服务未启动"))
           }
@@ -950,7 +959,7 @@ function TencentMeetingStatusPanel() {
     data?: { mode: string; message: string };
   } | null>(null);
   useEffect(() => {
-    fetch(apiUrl("/api/tencent-meeting/status"))
+    authorizedFetch("/api/tencent-meeting/status")
       .then((res) => res.json())
       .then(setStatus)
       .catch(() =>
@@ -984,7 +993,7 @@ function TencentMeetingStatusPanel() {
         <Divider />
         <Button
           onClick={() =>
-            fetch(apiUrl("/api/tencent-meeting/test"), { method: "POST" })
+            authorizedFetch("/api/tencent-meeting/test", { method: "POST" })
               .then((res) => res.json())
               .then((body) =>
                 message.info(

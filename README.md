@@ -18,6 +18,25 @@ npm run dev
 
 默认地址：前端 `http://localhost:5173`，后端 `http://localhost:3001`。运行 `npm run db:studio` 可打开 Prisma Studio。
 
+## 登录、角色与供应商隔离
+
+所有业务 API（腾讯会议 webhook 与健康检查除外）均要求 `Authorization: Bearer <token>`。会话令牌只以 SHA-256 哈希保存在 `AuthSession`；密码使用带随机盐的 scrypt 哈希。供应商范围由服务端根据当前会话决定，客户端传入其他 `supplierId`、供应商名称、候选人 ID、导入任务 ID 或 dashboardId 均不能扩大数据范围。
+
+角色包括平台管理员、内部招聘人员、供应商管理员和供应商招聘人员。平台管理员及内部招聘人员可查看全部供应商；供应商角色只可查看绑定公司的候选人、面试、导入任务和自动看板。平台管理员可在“账号管理”创建账号，供应商管理员只能管理本公司的招聘人员。
+
+`npm run db:seed` 会创建以下本地演示账号，密码可通过 `.env` 中的 `SEED_*_PASSWORD` 覆盖，生产部署后必须立即修改：
+
+```text
+admin@recruitment.local   / Admin123!       平台管理员
+internal@recruitment.local / Recruiter123!  内部招聘人员
+renrui@recruitment.local  / Supplier123!    人瑞供应商管理员
+deke@recruitment.local    / Supplier123!    德科供应商招聘人员
+```
+
+RBAC 迁移位于 `prisma/migrations/20260803010000_add_supplier_rbac`。
+
+生产首次部署需在后端设置至少 12 位的 `BOOTSTRAP_ADMIN_PASSWORD`。服务启动时仅在不存在平台管理员的情况下创建一次账号，不会在后续重启中覆盖密码。
+
 已有 `.env` 时不要覆盖，只需补充 `.env.example` 中的数据库和导入配置。生产环境必须覆盖 Compose 中的 Demo 密码，并确保 `.env` 不提交到版本库。
 
 ## 常用命令
@@ -27,8 +46,8 @@ npm run db:check       # PostgreSQL 连通性
 npm run db:generate    # 生成 Prisma Client
 npm run db:migrate     # 开发迁移
 npm run db:deploy      # 部署已有迁移
-npm run db:seed        # 初始化供应商和岗位
-npm test               # 导入核心规则与原有提醒测试
+npm run db:seed        # 初始化供应商、岗位与演示账号
+npm test               # 导入、权限范围与原有提醒测试
 npm run build          # 前后端类型检查与生产构建
 ```
 

@@ -8,6 +8,7 @@ import XLSX from "xlsx";
 import { z } from "zod";
 import { prisma } from "./database.js";
 import { parseWorkbook } from "./autoDashboardParser.js";
+import { assertSupplierIdentity, isSupplierUser } from "./auth.js";
 
 const router = Router();
 const uploadRoot = path.resolve(process.cwd(), process.env.AUTO_DASHBOARD_UPLOAD_DIR || "uploads/auto-dashboards");
@@ -31,6 +32,7 @@ const safeName = (value: string) => path.basename(value).replace(/[\u0000-\u001f
 const dashboardConfig = { title: "招聘结果看板", version: 1, modules: ["overview", "funnel", "businessComparison", "suppliers", "levels", "interviewResults", "entryStatus", "interviews", "candidates"] };
 
 router.post("/upload", uploader.single("file"), wrap(async (req, res) => {
+  assertSupplierIdentity(req);
   if (!req.file) throw new Error("AUTO_DASHBOARD_FILE_INVALID");
   const body = z.object({ uploadedBy: z.string().trim().max(100).optional() }).parse(req.body);
   const bytes = await fs.promises.readFile(req.file.path);
@@ -39,13 +41,17 @@ router.post("/upload", uploader.single("file"), wrap(async (req, res) => {
   const dataset = await prisma.importedDataset.create({ data: {
     name: originalFileName.replace(/\.(xlsx|xls|csv)$/i, ""), originalFileName,
     storedFileName: safeName(req.file.filename), fileHash, status: "READING_SHEETS", progress: 15,
-    statusMessage: "正在读取工作表", createdBy: body.uploadedBy || "匿名用户",
+    statusMessage: "正在读取工作表", createdBy: req.auth!.name, supplierId: isSupplierUser(req) ? req.auth!.supplierId : null,
   }});
   try {
     const isCsv = path.extname(originalFileName).toLowerCase() === ".csv";
     const workbook = XLSX.read(isCsv ? bytes.toString("utf8") : bytes, { type: isCsv ? "string" : "buffer", raw: isCsv, cellDates: false, cellFormula: false, cellNF: false, cellText: true, bookVBA: false });
     await prisma.importedDataset.update({ where: { id: dataset.id }, data: { totalSheets: workbook.SheetNames.length, status: "PARSING_INTERVIEWS", progress: 35, statusMessage: "正在识别面试数据" } });
     const parsed = parseWorkbook(workbook, 10_000);
+    if (isSupplierUser(req)) {
+      parsed.candidates.forEach((row) => { row.supplier = req.auth!.supplierName || "未知供应商"; });
+      parsed.suppliers.forEach((row) => { row.supplier = req.auth!.supplierName || "未知供应商"; });
+    }
     if (!parsed.processedSheets.length) throw new Error("AUTO_DASHBOARD_NO_RECOGNIZED_SHEETS");
     if (!parsed.candidates.length && !parsed.suppliers.length) throw new Error("AUTO_DASHBOARD_NO_DATA");
     await prisma.importedDataset.update({ where: { id: dataset.id }, data: { status: "SAVING_DATA", progress: 68, statusMessage: "正在保存数据" } });
@@ -65,22 +71,25 @@ router.post("/upload", uploader.single("file"), wrap(async (req, res) => {
 }));
 
 router.get("/tasks/:datasetId/status", wrap(async (req, res) => {
-  const data = await prisma.importedDataset.findUnique({ where: { id: req.params.datasetId }, select: { status: true, progress: true, statusMessage: true, warningCount: true, dashboardId: true } });
+  const data = await prisma.importedDataset.findFirst({ where: { id: req.params.datasetId, ...(isSupplierUser(req) ? { supplierId: req.auth!.supplierId! } : {}) }, select: { status: true, progress: true, statusMessage: true, warningCount: true, dashboardId: true } });
   if (!data) throw new Error("AUTO_DASHBOARD_NOT_FOUND");
   return success(res, { status: data.status, progress: data.progress, message: data.statusMessage, warningCount: data.warningCount, dashboardId: data.dashboardId });
 }));
 
-async function getDashboard(id: string) {
+async function getDashboard(req: Request, id: string) {
   const dashboard = await prisma.generatedDashboard.findUnique({ where: { id }, include: { dataset: true } });
   if (!dashboard) throw new Error("AUTO_DASHBOARD_NOT_FOUND");
+  if (isSupplierUser(req) && dashboard.dataset.supplierId !== req.auth!.supplierId) throw new Error("AUTO_DASHBOARD_NOT_FOUND");
   return dashboard;
 }
+const candidateWhere = (req: Request, datasetId: string) => ({ datasetId, ...(isSupplierUser(req) ? { supplier: req.auth!.supplierName! } : {}) });
+const summaryWhere = (req: Request, datasetId: string) => ({ datasetId, ...(isSupplierUser(req) ? { supplier: req.auth!.supplierName! } : {}) });
 const nullableCount = (available: boolean, count: number) => available ? count : null;
 
-async function overviewForDataset(datasetId: string) {
+async function overviewForDataset(req: Request, datasetId: string) {
   const [rows, summaries] = await Promise.all([
-    prisma.importedCandidate.findMany({ where: { datasetId }, select: { businessType: true, interviewResult: true, entryStatus: true } }),
-    prisma.importedSupplierSummary.findMany({ where: { datasetId } }),
+    prisma.importedCandidate.findMany({ where: candidateWhere(req, datasetId), select: { businessType: true, interviewResult: true, entryStatus: true } }),
+    prisma.importedSupplierSummary.findMany({ where: summaryWhere(req, datasetId) }),
   ]);
   const c = (field: string, value: string) => rows.filter((r) => r[field] === value).length;
   const sum = (field: string) => summaries.reduce((total, row) => total + (row[field] || 0), 0);
@@ -102,52 +111,54 @@ async function overviewForDataset(datasetId: string) {
 }
 
 router.get("/:dashboardId", wrap(async (req, res) => {
-  const dashboard = await getDashboard(req.params.dashboardId);
-  return success(res, { dashboard: { id: dashboard.id, name: dashboard.name, config: dashboard.config, updatedAt: dashboard.updatedAt }, dataset: dashboard.dataset, overview: await overviewForDataset(dashboard.datasetId) });
+  const dashboard = await getDashboard(req, req.params.dashboardId);
+  const overview = await overviewForDataset(req, dashboard.datasetId);
+  const dataset = isSupplierUser(req) ? { ...dashboard.dataset, candidateCount: overview.candidateTotal, supplierCount: overview.candidateTotal ? 1 : 0 } : dashboard.dataset;
+  return success(res, { dashboard: { id: dashboard.id, name: dashboard.name, config: dashboard.config, updatedAt: dashboard.updatedAt }, dataset, overview });
 }));
 
 router.get("/:dashboardId/overview", wrap(async (req, res) => {
-  const dashboard = await getDashboard(req.params.dashboardId);
-  return success(res, await overviewForDataset(dashboard.datasetId));
+  const dashboard = await getDashboard(req, req.params.dashboardId);
+  return success(res, await overviewForDataset(req, dashboard.datasetId));
 }));
 
 router.get("/:dashboardId/funnel", wrap(async (req, res) => {
-  const { datasetId } = await getDashboard(req.params.dashboardId);
-  const [rows, summaries] = await Promise.all([prisma.importedCandidate.findMany({ where: { datasetId }, select: { interviewTimeRaw: true, interviewResult: true, entryStatus: true } }), prisma.importedSupplierSummary.findMany({ where: { datasetId } })]);
+  const { datasetId } = await getDashboard(req, req.params.dashboardId);
+  const [rows, summaries] = await Promise.all([prisma.importedCandidate.findMany({ where: candidateWhere(req, datasetId), select: { interviewTimeRaw: true, interviewResult: true, entryStatus: true } }), prisma.importedSupplierSummary.findMany({ where: summaryWhere(req, datasetId) })]);
   const sum = (field: string) => summaries.reduce((n, r) => n + (r[field] || 0), 0), summaryPassed = sum("videoInterviewPassed") + sum("audioInterviewPassed"), summaryConfirmed = sum("videoConfirmedEntry") + sum("audioConfirmedEntry"), summaryJoined = sum("videoActualEntry") + sum("audioActualEntry"), summaryCandidates = sum("videoResumeCount") + sum("audioResumeCount");
   const counts = [rows.length || summaryCandidates, rows.filter((r) => r.interviewTimeRaw).length, rows.some((r) => r.interviewResult !== "未知") ? rows.filter((r) => r.interviewResult === "通过").length : summaryPassed, rows.some((r) => r.entryStatus !== "未知") ? rows.filter((r) => ["待入职", "已入职", "已离职"].includes(r.entryStatus || "")).length : summaryConfirmed, rows.some((r) => r.entryStatus !== "未知") ? rows.filter((r) => r.entryStatus === "已入职").length : summaryJoined];
   return success(res, ["候选人", "已安排面试", "面试通过", "确认入职", "已入职"].map((name, i) => ({ name, count: counts[i], previousRate: i === 0 || !counts[i - 1] ? null : counts[i] / counts[i - 1], cumulativeRate: i === 0 || !counts[0] ? (i === 0 ? 1 : null) : counts[i] / counts[0] })));
 }));
 
 router.get("/:dashboardId/business-comparison", wrap(async (req, res) => {
-  const { datasetId } = await getDashboard(req.params.dashboardId);
-  const [rows, summaries] = await Promise.all([prisma.importedCandidate.findMany({ where: { datasetId }, select: { businessType: true, interviewResult: true, entryStatus: true } }), prisma.importedSupplierSummary.findMany({ where: { datasetId } })]);
+  const { datasetId } = await getDashboard(req, req.params.dashboardId);
+  const [rows, summaries] = await Promise.all([prisma.importedCandidate.findMany({ where: candidateWhere(req, datasetId), select: { businessType: true, interviewResult: true, entryStatus: true } }), prisma.importedSupplierSummary.findMany({ where: summaryWhere(req, datasetId) })]);
   const sum = (field: string) => summaries.reduce((n, r) => n + (r[field] || 0), 0);
   return success(res, ["视频", "音频"].map((businessType) => { const own = rows.filter((r) => r.businessType === businessType), prefix = businessType === "视频" ? "video" : "audio"; return { businessType, candidates: own.length || sum(`${prefix}ResumeCount`), passed: own.some((r) => r.interviewResult !== "未知") ? own.filter((r) => r.interviewResult === "通过").length : sum(`${prefix}InterviewPassed`), joined: own.some((r) => r.entryStatus !== "未知") ? own.filter((r) => r.entryStatus === "已入职").length : sum(`${prefix}ActualEntry`) }; }));
 }));
 
 router.get("/:dashboardId/suppliers", wrap(async (req, res) => {
-  const { datasetId } = await getDashboard(req.params.dashboardId);
-  const [rows, summaries] = await Promise.all([prisma.importedCandidate.findMany({ where: { datasetId }, select: { supplier: true, businessType: true, interviewResult: true, entryStatus: true } }), prisma.importedSupplierSummary.findMany({ where: { datasetId } })]);
+  const { datasetId } = await getDashboard(req, req.params.dashboardId);
+  const [rows, summaries] = await Promise.all([prisma.importedCandidate.findMany({ where: candidateWhere(req, datasetId), select: { supplier: true, businessType: true, interviewResult: true, entryStatus: true } }), prisma.importedSupplierSummary.findMany({ where: summaryWhere(req, datasetId) })]);
   const names = [...new Set([...rows.map((r) => r.supplier || "未知供应商"), ...summaries.map((r) => r.supplier)])];
   return success(res, names.map((supplier) => { const own = rows.filter((r) => (r.supplier || "未知供应商") === supplier), sum = summaries.filter((r) => r.supplier === supplier); const total = (field: string) => sum.reduce((n, r) => n + (r[field] || 0), 0); return { supplier, candidates: own.length, passed: own.filter((r) => r.interviewResult === "通过").length || total("videoInterviewPassed") + total("audioInterviewPassed"), failed: own.filter((r) => r.interviewResult === "不通过").length, joined: own.filter((r) => r.entryStatus === "已入职").length || total("videoActualEntry") + total("audioActualEntry"), abandoned: own.filter((r) => r.entryStatus === "已放弃").length, videoPassed: own.filter((r) => r.businessType === "视频" && r.interviewResult === "通过").length || total("videoInterviewPassed"), audioPassed: own.filter((r) => r.businessType === "音频" && r.interviewResult === "通过").length || total("audioInterviewPassed") }; }));
 }));
 
-async function distribution(dashboardId: string, field: string, values: string[]) { const { datasetId } = await getDashboard(dashboardId); const rows = await prisma.importedCandidate.groupBy({ by: [field], where: { datasetId }, _count: { _all: true } }); return values.map((name) => ({ name, value: rows.find((r) => (r[field] || "未知") === name)?._count._all || 0 })); }
-router.get("/:dashboardId/levels", wrap(async (req, res) => { const { datasetId } = await getDashboard(req.params.dashboardId); const rows = await prisma.importedCandidate.findMany({ where: { datasetId }, select: { level: true } }); return success(res, ["L1", "L2", "其他定级", "未定级"].map((name) => ({ name, value: rows.filter((r) => name === "其他定级" ? !["L1", "L2", "未定级", null].includes(r.level) : (r.level || "未定级").toUpperCase() === name).length }))); }));
-router.get("/:dashboardId/interview-results", wrap(async (req, res) => success(res, await distribution(req.params.dashboardId, "interviewResult", ["通过", "不通过", "待反馈", "取消", "未知"]))));
-router.get("/:dashboardId/entry-status", wrap(async (req, res) => success(res, await distribution(req.params.dashboardId, "entryStatus", ["已入职", "待入职", "已放弃", "已离职", "未知"]))));
+async function distribution(req: Request, dashboardId: string, field: string, values: string[]) { const { datasetId } = await getDashboard(req, dashboardId); const rows = await prisma.importedCandidate.groupBy({ by: [field], where: candidateWhere(req, datasetId), _count: { _all: true } }); return values.map((name) => ({ name, value: rows.find((r) => (r[field] || "未知") === name)?._count._all || 0 })); }
+router.get("/:dashboardId/levels", wrap(async (req, res) => { const { datasetId } = await getDashboard(req, req.params.dashboardId); const rows = await prisma.importedCandidate.findMany({ where: candidateWhere(req, datasetId), select: { level: true } }); return success(res, ["L1", "L2", "其他定级", "未定级"].map((name) => ({ name, value: rows.filter((r) => name === "其他定级" ? !["L1", "L2", "未定级", null].includes(r.level) : (r.level || "未定级").toUpperCase() === name).length }))); }));
+router.get("/:dashboardId/interview-results", wrap(async (req, res) => success(res, await distribution(req, req.params.dashboardId, "interviewResult", ["通过", "不通过", "待反馈", "取消", "未知"]))));
+router.get("/:dashboardId/entry-status", wrap(async (req, res) => success(res, await distribution(req, req.params.dashboardId, "entryStatus", ["已入职", "待入职", "已放弃", "已离职", "未知"]))));
 
 router.get("/:dashboardId/interviews", wrap(async (req, res) => {
-  const { datasetId } = await getDashboard(req.params.dashboardId);
-  return success(res, await prisma.importedCandidate.findMany({ where: { datasetId, interviewTimeRaw: { not: null } }, orderBy: [{ interviewStartTime: "desc" }, { sourceRow: "desc" }], take: 20 }));
+  const { datasetId } = await getDashboard(req, req.params.dashboardId);
+  return success(res, await prisma.importedCandidate.findMany({ where: { ...candidateWhere(req, datasetId), interviewTimeRaw: { not: null } }, orderBy: [{ interviewStartTime: "desc" }, { sourceRow: "desc" }], take: 20 }));
 }));
 
 router.get("/:dashboardId/candidates", wrap(async (req, res) => {
-  const { datasetId } = await getDashboard(req.params.dashboardId);
-  const where: any = { datasetId };
+  const { datasetId } = await getDashboard(req, req.params.dashboardId);
+  const where: any = candidateWhere(req, datasetId);
   if (req.query.keyword) where.name = { contains: String(req.query.keyword), mode: "insensitive" };
-  if (req.query.supplier) where.supplier = String(req.query.supplier);
+  if (req.query.supplier && !isSupplierUser(req)) where.supplier = String(req.query.supplier);
   if (req.query.businessType) where.businessType = String(req.query.businessType);
   if (req.query.interviewResult) where.interviewResult = String(req.query.interviewResult);
   if (req.query.entryStatus) where.entryStatus = String(req.query.entryStatus);
