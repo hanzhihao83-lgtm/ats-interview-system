@@ -8,3 +8,5 @@ uploads/
 data/*.db
 data/*.sqlite
 data/kim-interviews.json
+.vercel
+.env*
