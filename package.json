@@ -8,7 +8,7 @@
     "dev:web": "vite",
     "dev:server": "tsx watch server/index.ts",
     "test:server": "node server/interviewReminderService.test.mjs",
-    "test": "node --import ./scripts/testSetup.mjs --import tsx --test server/recruitmentCore.test.ts server/autoDashboardParser.test.ts server/auth.test.ts server/dataScope.test.ts server/workflowService.test.ts && npm run test:server",
+    "test": "node --import ./scripts/testSetup.mjs --import tsx --test server/recruitmentCore.test.ts server/autoDashboardParser.test.ts server/auth.test.ts server/dataScope.test.ts server/interviewerCalendarService.test.ts server/workflowService.test.ts && npm run test:server",
     "test:auto-dashboard": "node --import tsx --test server/autoDashboardParser.test.ts",
     "test:rbac:smoke": "node scripts/rbacSmoke.mjs",
     "test:business:smoke": "node --import tsx scripts/businessApiSmoke.ts",

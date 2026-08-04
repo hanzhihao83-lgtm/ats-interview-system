@@ -1,5 +1,7 @@
 # 供应商简历与人员状态日报看板
 
+已确认的外包公司权限隔离与面试官时间看板需求见 [`docs/outsourcing-permissions-and-interviewer-calendar-requirements.md`](docs/outsourcing-permissions-and-interviewer-calendar-requirements.md)。
+
 项目使用 React + TypeScript + Vite 前端、Express + TypeScript 后端、Prisma ORM 和 PostgreSQL。候选人、导入任务、预览行、状态历史与操作日志由后端写入数据库；浏览器不保存数据库凭证，也不再使用 Mock 数据覆盖数据库查询结果。
 
 ## 本地启动

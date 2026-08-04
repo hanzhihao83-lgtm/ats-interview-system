@@ -6,9 +6,10 @@ import { Router, type NextFunction, type Request, type Response } from "express"
 import multer from "multer";
 import XLSX from "xlsx";
 import { z } from "zod";
+import { FeaturePermission } from "@prisma/client";
 import { prisma } from "./database.js";
 import { parseWorkbook } from "./autoDashboardParser.js";
-import { assertSupplierIdentity, isSupplierUser } from "./auth.js";
+import { assertPermission, assertSupplierIdentity, isSupplierUser } from "./auth.js";
 import { buildDataScope, parseBusinessLine } from "./dataScopeService.js";
 
 const router = Router();
@@ -33,19 +34,19 @@ const safeName = (value: string) => path.basename(value).replace(/[\u0000-\u001f
 const dashboardConfig = { title: "招聘结果看板", version: 1, modules: ["overview", "funnel", "businessComparison", "suppliers", "levels", "interviewResults", "entryStatus", "interviews", "candidates"] };
 
 router.post("/upload", uploader.single("file"), wrap(async (req, res) => {
+  assertPermission(req, FeaturePermission.CANDIDATE_IMPORT);
   assertSupplierIdentity(req);
   if (!req.file) throw new Error("AUTO_DASHBOARD_FILE_INVALID");
   const body = z.object({ uploadedBy: z.string().trim().max(100).optional(), businessLine: z.string().optional() }).parse(req.body);
   const requestedLine = !body.businessLine || ["COMBINED", "综合"].includes(body.businessLine.toUpperCase()) ? undefined : parseBusinessLine(body.businessLine);
   const scope = buildDataScope(req.auth!, undefined, requestedLine);
-  if (isSupplierUser(req) && req.auth!.role === "SUPPLIER_ADMIN" && !scope.businessLine) throw new Error("DATA_SCOPE_FORBIDDEN");
   const bytes = await fs.promises.readFile(req.file.path);
   const fileHash = createHash("sha256").update(bytes).digest("hex");
   const originalFileName = safeName(req.file.originalname);
   const dataset = await prisma.importedDataset.create({ data: {
     name: originalFileName.replace(/\.(xlsx|xls|csv)$/i, ""), originalFileName,
     storedFileName: safeName(req.file.filename), fileHash, status: "READING_SHEETS", progress: 15,
-    statusMessage: "正在读取工作表", createdBy: req.auth!.name, supplierId: scope.supplierId || null, businessLine: scope.businessLine || null,
+    statusMessage: "正在读取工作表", createdBy: req.auth!.name, createdById: req.auth!.id, supplierId: scope.supplierId || null, businessLine: scope.businessLine || null,
   }});
   try {
     const isCsv = path.extname(originalFileName).toLowerCase() === ".csv";
@@ -75,20 +76,42 @@ router.post("/upload", uploader.single("file"), wrap(async (req, res) => {
   }
 }));
 
+router.use((req, _res, next) => {
+  try {
+    assertPermission(req, FeaturePermission.CANDIDATE_VIEW);
+    next();
+  } catch (error) {
+    next(error);
+  }
+});
+
+const effectiveSupplierId = (req: Request) =>
+  req.auth!.simulation?.supplierId || (isSupplierUser(req) ? req.auth!.supplierId : null);
+const effectiveSupplierName = (req: Request) =>
+  req.auth!.simulation?.supplierName || (isSupplierUser(req) ? req.auth!.supplierName : null);
+const datasetAccessWhere = (req: Request) => {
+  const scope = buildDataScope(req.auth!);
+  return {
+    ...(scope.supplierId ? { supplierId: scope.supplierId } : {}),
+    ...(scope.ownerId ? { createdById: scope.ownerId } : {}),
+    ...(scope.businessLine ? { businessLine: scope.businessLine } : {}),
+    ...(scope.businessLines ? { businessLine: { in: scope.businessLines } } : {}),
+  };
+};
+
 router.get("/tasks/:datasetId/status", wrap(async (req, res) => {
-  const data = await prisma.importedDataset.findFirst({ where: { id: req.params.datasetId, ...(isSupplierUser(req) ? { supplierId: req.auth!.supplierId! } : {}) }, select: { status: true, progress: true, statusMessage: true, warningCount: true, dashboardId: true } });
+  const data = await prisma.importedDataset.findFirst({ where: { id: req.params.datasetId, ...datasetAccessWhere(req) }, select: { status: true, progress: true, statusMessage: true, warningCount: true, dashboardId: true } });
   if (!data) throw new Error("AUTO_DASHBOARD_NOT_FOUND");
   return success(res, { status: data.status, progress: data.progress, message: data.statusMessage, warningCount: data.warningCount, dashboardId: data.dashboardId });
 }));
 
 async function getDashboard(req: Request, id: string) {
-  const dashboard = await prisma.generatedDashboard.findUnique({ where: { id }, include: { dataset: true } });
+  const dashboard = await prisma.generatedDashboard.findFirst({ where: { id, dataset: datasetAccessWhere(req) }, include: { dataset: true } });
   if (!dashboard) throw new Error("AUTO_DASHBOARD_NOT_FOUND");
-  if (isSupplierUser(req) && dashboard.dataset.supplierId !== req.auth!.supplierId) throw new Error("AUTO_DASHBOARD_NOT_FOUND");
   return dashboard;
 }
-const candidateWhere = (req: Request, datasetId: string) => ({ datasetId, ...(isSupplierUser(req) ? { supplier: req.auth!.supplierName! } : {}) });
-const summaryWhere = (req: Request, datasetId: string) => ({ datasetId, ...(isSupplierUser(req) ? { supplier: req.auth!.supplierName! } : {}) });
+const candidateWhere = (req: Request, datasetId: string) => ({ datasetId, ...(effectiveSupplierName(req) ? { supplier: effectiveSupplierName(req)! } : {}) });
+const summaryWhere = (req: Request, datasetId: string) => ({ datasetId, ...(effectiveSupplierName(req) ? { supplier: effectiveSupplierName(req)! } : {}) });
 const nullableCount = (available: boolean, count: number) => available ? count : null;
 
 async function overviewForDataset(req: Request, datasetId: string) {
@@ -118,7 +141,7 @@ async function overviewForDataset(req: Request, datasetId: string) {
 router.get("/:dashboardId", wrap(async (req, res) => {
   const dashboard = await getDashboard(req, req.params.dashboardId);
   const overview = await overviewForDataset(req, dashboard.datasetId);
-  const dataset = isSupplierUser(req) ? { ...dashboard.dataset, candidateCount: overview.candidateTotal, supplierCount: overview.candidateTotal ? 1 : 0 } : dashboard.dataset;
+  const dataset = effectiveSupplierId(req) ? { ...dashboard.dataset, candidateCount: overview.candidateTotal, supplierCount: overview.candidateTotal ? 1 : 0 } : dashboard.dataset;
   return success(res, { dashboard: { id: dashboard.id, name: dashboard.name, config: dashboard.config, updatedAt: dashboard.updatedAt }, dataset, overview });
 }));
 
@@ -163,11 +186,12 @@ router.get("/:dashboardId/candidates", wrap(async (req, res) => {
   const { datasetId } = await getDashboard(req, req.params.dashboardId);
   const where: any = candidateWhere(req, datasetId);
   if (req.query.keyword) where.name = { contains: String(req.query.keyword), mode: "insensitive" };
-  if (req.query.supplier && !isSupplierUser(req)) where.supplier = String(req.query.supplier);
+  if (req.query.supplier && !effectiveSupplierId(req)) where.supplier = String(req.query.supplier);
   if (req.query.businessType) where.businessType = String(req.query.businessType);
   if (req.query.interviewResult) where.interviewResult = String(req.query.interviewResult);
   if (req.query.entryStatus) where.entryStatus = String(req.query.entryStatus);
   if (req.query.export === "xlsx") {
+    assertPermission(req, FeaturePermission.DATA_EXPORT);
     const rows = await prisma.importedCandidate.findMany({ where, orderBy: { sourceRow: "asc" }, take: 10_000 });
     const sheet = XLSX.utils.json_to_sheet(rows.map((r) => ({ 候选人: r.name, 供应商: r.supplier, 业务方向: r.businessType, 面试时间: r.interviewTimeRaw, 腾讯会议: r.meetingUrl || r.meetingCode, 面试结果: r.interviewResult, 定级: r.level, 面试官: r.interviewer, 面评: r.interviewComment, 入职日期: r.entryDate?.toISOString().slice(0, 10), 入职状态: r.entryStatus, 来源工作表: r.sourceSheet })));
     const book = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(book, sheet, "候选人明细"); const buffer = XLSX.write(book, { type: "buffer", bookType: "xlsx" });

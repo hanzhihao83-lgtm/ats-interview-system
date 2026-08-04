@@ -2,6 +2,7 @@ import { Router, type NextFunction, type Request, type Response } from "express"
 import { createHash, randomBytes } from "node:crypto";
 import {
   BusinessLine,
+  FeaturePermission,
   InterviewFeedbackStatus,
   LevelAdjustmentStatus,
   OfferStatus,
@@ -15,6 +16,10 @@ import { z } from "zod";
 import { prisma } from "./database.js";
 import { buildDataScope, applicationScopeWhere, parseBusinessLine, type DataScope } from "./dataScopeService.js";
 import { createTencentMeetingClient } from "./tencentMeetingClient.js";
+import { assertPermission, hasPermission } from "./auth.js";
+import { assertInterviewerAvailable } from "./interviewerCalendarService.js";
+// @ts-ignore JS 适配器在 Node 运行时加载
+import { createKimClient } from "./kimClient.mjs";
 import {
   assertFeedbackComplete,
   assertWorkflowTransition,
@@ -23,12 +28,18 @@ import {
 } from "./workflowService.js";
 
 const router = Router();
+const meetingClient = createTencentMeetingClient();
 const wrap = (fn: (req: Request, res: Response) => Promise<unknown>) =>
   (req: Request, res: Response, next: NextFunction) => Promise.resolve(fn(req, res)).catch(next);
 const success = (res: Response, data: unknown, status = 200) =>
   res.status(status).json({ success: true, data, requestId: res.locals.requestId });
 const json = (value: unknown): Prisma.InputJsonValue => JSON.parse(JSON.stringify(value ?? null));
 const actor = (req: Request) => ({ id: req.auth!.id, name: req.auth!.name });
+const selfSchedulingEnabled = () =>
+  String(process.env.CANDIDATE_SELF_SCHEDULING_ENABLED || "false").toLowerCase() === "true";
+const assertSelfSchedulingEnabled = () => {
+  if (!selfSchedulingEnabled()) throw new Error("SCHEDULING_FEATURE_DISABLED");
+};
 const requestedLine = (req: Request) => parseBusinessLine(req.query.businessLine);
 const scopeFor = (req: Request): DataScope =>
   buildDataScope(
@@ -52,7 +63,17 @@ const assertManagerRole = (req: Request) => {
 };
 
 const workflowInclude = {
-  candidate: { select: { id: true, candidateNo: true, name: true, phoneMasked: true, emailMasked: true } },
+  candidate: {
+    select: {
+      id: true,
+      candidateNo: true,
+      name: true,
+      phone: true,
+      email: true,
+      phoneMasked: true,
+      emailMasked: true,
+    },
+  },
   supplier: { select: { id: true, name: true, code: true } },
   position: { select: { id: true, name: true, feedbackTemplate: true } },
   interviews: {
@@ -67,16 +88,57 @@ const workflowInclude = {
   receptionTask: { include: { checklist: { orderBy: { sortOrder: "asc" as const } } } },
   schedulingRequests: { orderBy: { createdAt: "desc" as const }, take: 5 },
   screeningResults: { orderBy: { createdAt: "desc" as const }, take: 10 },
+  owner: { select: { id: true, name: true, email: true } },
 } satisfies Prisma.CandidateApplicationInclude;
 
 async function findApplication(req: Request, id: string) {
   const scope = scopeFor(req);
   const application = await prisma.candidateApplication.findFirst({
-    where: { id, ...applicationScopeWhere(scope) },
+    where: {
+      id,
+      ...(req.auth!.role === UserRole.INTERVIEWER
+        ? { interviews: { some: { interviewerProfileId: req.auth!.interviewerProfileId || "" } } }
+        : applicationScopeWhere(scope)),
+    },
     include: workflowInclude,
   });
   if (!application) throw new Error("APPLICATION_NOT_FOUND");
   return application;
+}
+
+function workflowPayload(req: Request, application: Awaited<ReturnType<typeof findApplication>>) {
+  const contactsVisible = hasPermission(req, FeaturePermission.CANDIDATE_CONTACT_VIEW);
+  const interviewsVisible =
+    hasPermission(req, FeaturePermission.INTERVIEW_VIEW) ||
+    hasPermission(req, FeaturePermission.INTERVIEW_SCHEDULE);
+  const feedbackVisible = hasPermission(req, FeaturePermission.FEEDBACK_VIEW);
+  const interviewerOnly = req.auth!.role === UserRole.INTERVIEWER;
+  return {
+    ...application,
+    candidate: {
+      ...application.candidate,
+      phone: contactsVisible ? application.candidate.phone : application.candidate.phoneMasked,
+      email: contactsVisible ? application.candidate.email : application.candidate.emailMasked,
+    },
+    interviews: interviewsVisible
+      ? application.interviews
+        .filter((interview) => !interviewerOnly || interview.interviewerProfileId === req.auth!.interviewerProfileId)
+        .map((interview) => ({
+          ...interview,
+          feedbackRecord: feedbackVisible ? interview.feedbackRecord : undefined,
+        }))
+      : [],
+    conclusion: !interviewerOnly && feedbackVisible ? application.conclusion : undefined,
+    offers: interviewerOnly ? [] : application.offers,
+    levelAdjustments: interviewerOnly ? [] : application.levelAdjustments,
+    onboarding: interviewerOnly ? undefined : application.onboarding,
+    owner: interviewerOnly ? undefined : application.owner,
+    businessData: interviewerOnly ? undefined : application.businessData,
+    screeningResults: interviewerOnly ? [] : application.screeningResults,
+    receptionTask: hasPermission(req, FeaturePermission.RECEPTION_VIEW)
+      ? application.receptionTask
+      : undefined,
+  };
 }
 
 async function transitionApplication(
@@ -128,11 +190,12 @@ async function transitionApplicationAs(
 }
 
 router.get("/workflow/applications/:id", wrap(async (req, res) =>
-  success(res, await findApplication(req, String(req.params.id))),
+  (req.auth!.role === UserRole.INTERVIEWER || assertPermission(req, FeaturePermission.CANDIDATE_VIEW),
+  success(res, workflowPayload(req, await findApplication(req, String(req.params.id))))),
 ));
 
 router.post("/applications/:id/actions/transition", wrap(async (req, res) => {
-  assertInternalDecisionRole(req);
+  assertPermission(req, FeaturePermission.SCREENING_SUBMIT);
   const body = z.object({ targetStatus: z.string().min(1), reason: z.string().trim().min(2) }).parse(req.body);
   const application = await findApplication(req, String(req.params.id));
   const isScreeningDecision = application.currentStatus === "简历待筛选"
@@ -145,7 +208,7 @@ router.post("/applications/:id/actions/transition", wrap(async (req, res) => {
       data: { resumeResult: body.targetStatus === "待安排面试" ? "通过" : "不通过" },
     });
   });
-  return success(res, await findApplication(req, application.id));
+  return success(res, workflowPayload(req, await findApplication(req, application.id)));
 }));
 
 const scheduleBody = z.object({
@@ -153,8 +216,64 @@ const scheduleBody = z.object({
   scheduledEndTime: z.string().datetime({ offset: true }),
   round: z.number().int().positive().default(1),
   roundName: z.string().trim().min(1).default("第一轮"),
-  interviewer: z.string().trim().min(1),
+  interviewerId: z.string().trim().min(1),
 });
+
+async function createInterviewNotifications(
+  tx: Prisma.TransactionClient,
+  input: {
+    type: "INTERVIEW_CREATED" | "INTERVIEW_RESCHEDULED" | "INTERVIEW_CANCELLED";
+    title: string;
+    content: string;
+    application: { id: string; ownerId: string | null; supplierId: string; businessLine: BusinessLine };
+    interviewId: string;
+    interviewerUserId: string;
+    idempotencySuffix?: string;
+  },
+) {
+  const notificationKey = `${input.type}-${input.interviewId}${input.idempotencySuffix ? `-${input.idempotencySuffix}` : ""}`;
+  const recipients = [...new Set([input.application.ownerId, input.interviewerUserId].filter(Boolean))] as string[];
+  for (const userId of recipients)
+    await tx.siteNotification.upsert({
+      where: { idempotencyKey: `${notificationKey}-${userId}` },
+      update: {},
+      create: {
+        userId,
+        type: input.type,
+        title: input.title,
+        content: input.content,
+        applicationId: input.application.id,
+        interviewId: input.interviewId,
+        idempotencyKey: `${notificationKey}-${userId}`,
+      },
+    });
+  await tx.kimNotificationLog.upsert({
+    where: { idempotencyKey: `${notificationKey}-kim` },
+    update: {},
+    create: {
+      applicationId: input.application.id,
+      interviewId: input.interviewId,
+      supplierId: input.application.supplierId,
+      businessLine: input.application.businessLine,
+      recipientUserId: input.interviewerUserId,
+      status: "PENDING",
+      messageSummary: input.content,
+      idempotencyKey: `${notificationKey}-kim`,
+    },
+  });
+}
+
+async function sendInterviewerKim(kimUserId: string | null, title: string, content: string) {
+  const result = await createKimClient().sendMessage(
+    {},
+    {
+      type: "markdown",
+      title,
+      content: `${kimUserId ? `@${kimUserId} ` : ""}${content}`,
+    },
+  );
+  return result;
+}
 
 async function interviewHasConflict(
   client: Pick<Prisma.TransactionClient, "$queryRaw">,
@@ -186,6 +305,7 @@ async function lockAndAssertInterviewAvailable(
 }
 
 router.post("/applications/:id/interviews", wrap(async (req, res) => {
+  assertPermission(req, FeaturePermission.INTERVIEW_SCHEDULE);
   const body = scheduleBody.parse(req.body);
   const application = await findApplication(req, String(req.params.id));
   if (!["待安排面试", "待面试", "面试待反馈"].includes(application.currentStatus))
@@ -194,9 +314,18 @@ router.post("/applications/:id/interviews", wrap(async (req, res) => {
   if (end <= start) throw new Error("INTERVIEW_TIME_INVALID");
   if (start <= new Date()) throw new Error("INTERVIEW_TIME_PAST");
 
+  const interviewerProfile = await prisma.interviewerProfile.findUnique({
+    where: { id: body.interviewerId },
+    include: { user: { select: { id: true, name: true, kimUserId: true } } },
+  });
+  if (!interviewerProfile) throw new Error("INTERVIEWER_NOT_FOUND");
+
   const currentActor = actor(req);
   const interview = await prisma.$transaction(async (tx) => {
-    await lockAndAssertInterviewAvailable(tx, body.interviewer, start, end);
+    await assertInterviewerAvailable(tx, interviewerProfile, start, end, {
+      businessLine: application.businessLine,
+      positionId: application.positionId,
+    });
     const created = await tx.interview.create({ data: {
       applicationId: application.id,
       candidateId: application.candidateId,
@@ -207,20 +336,20 @@ router.post("/applications/:id/interviews", wrap(async (req, res) => {
       feedbackDueAt: feedbackDueAt(end),
       round: body.round,
       roundName: body.roundName,
-      interviewer: body.interviewer,
+      interviewer: interviewerProfile.user.name,
+      interviewerProfileId: interviewerProfile.id,
       status: "待面试",
     }});
     if (["待安排面试", "面试待反馈"].includes(application.currentStatus))
       await transitionApplication(tx, application, "待面试", req, `已安排${body.roundName}`);
-    await tx.kimNotificationLog.create({ data: {
-      applicationId: application.id,
+    await createInterviewNotifications(tx, {
+      type: "INTERVIEW_CREATED",
+      title: "面试安排通知",
+      content: `【面试安排】${application.candidate.name} ${body.roundName} ${start.toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })}，面试官：${interviewerProfile.user.name}`,
+      application,
       interviewId: created.id,
-      supplierId: application.supplierId,
-      businessLine: application.businessLine,
-      status: "PENDING",
-      messageSummary: `【面试安排】${body.roundName} ${start.toISOString()}，面试官：${body.interviewer}`,
-      idempotencyKey: `interview-created-${created.id}`,
-    }});
+      interviewerUserId: interviewerProfile.user.id,
+    });
     await tx.operationLog.create({ data: {
       module: "面试",
       action: "安排面试",
@@ -228,7 +357,7 @@ router.post("/applications/:id/interviews", wrap(async (req, res) => {
       applicationId: application.id,
       supplierId: application.supplierId,
       businessLine: application.businessLine,
-      newValue: json({ start, end, interviewer: body.interviewer, round: body.round }),
+      newValue: json({ start, end, interviewerId: interviewerProfile.id, interviewer: interviewerProfile.user.name, round: body.round }),
       operatorId: currentActor.id,
       operator: currentActor.name,
     }});
@@ -237,7 +366,7 @@ router.post("/applications/:id/interviews", wrap(async (req, res) => {
 
   let meeting: unknown = null;
   try {
-    const createdMeeting = await createTencentMeetingClient().createMeeting({
+    const createdMeeting = await meetingClient.createMeeting({
       subject: `招聘面试｜${application.candidate.name}｜${application.position?.name || "招聘岗位"}｜${body.roundName}`,
       startTime: start.toISOString(),
       endTime: end.toISOString(),
@@ -252,7 +381,7 @@ router.post("/applications/:id/interviews", wrap(async (req, res) => {
         meetingUrl: createdMeeting.joinUrl,
         providerId: createdMeeting.meetingId,
         status: createdMeeting.status,
-        interviewer: body.interviewer,
+        interviewer: interviewerProfile.user.name,
         scheduledAt: start,
       }});
       await tx.interview.update({ where: { id: interview.id }, data: {
@@ -265,7 +394,198 @@ router.post("/applications/:id/interviews", wrap(async (req, res) => {
   } catch {
     await prisma.interview.update({ where: { id: interview.id }, data: { status: "会议创建失败" } });
   }
+  const kimResult = await sendInterviewerKim(
+    interviewerProfile.user.kimUserId,
+    "面试安排通知",
+    `${application.candidate.name} ${body.roundName}，时间：${start.toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })}`,
+  );
+  await prisma.kimNotificationLog.updateMany({
+    where: { idempotencyKey: `INTERVIEW_CREATED-${interview.id}-kim` },
+    data: { status: kimResult.success ? "SUCCESS" : "FAILED", errorMessage: kimResult.success ? null : kimResult.message },
+  });
   return success(res, { interview, meeting }, 201);
+}));
+
+async function findScopedInterview(req: Request, id: string) {
+  const scope = scopeFor(req);
+  const interview = await prisma.interview.findFirst({
+    where: { id, application: applicationScopeWhere(scope) },
+    include: {
+      application: {
+        include: {
+          candidate: true,
+          supplier: true,
+          position: true,
+          owner: true,
+        },
+      },
+      interviewerProfile: { include: { user: true } },
+    },
+  });
+  if (!interview?.application) throw new Error("INTERVIEW_NOT_FOUND");
+  return interview;
+}
+
+router.put("/workflow/interviews/:id/schedule", wrap(async (req, res) => {
+  assertPermission(req, FeaturePermission.INTERVIEW_SCHEDULE);
+  const body = z.object({
+    scheduledStartTime: z.string().datetime({ offset: true }),
+    scheduledEndTime: z.string().datetime({ offset: true }),
+    interviewerId: z.string().trim().min(1).optional(),
+    reason: z.string().trim().min(2),
+  }).parse(req.body);
+  const interview = await findScopedInterview(req, String(req.params.id));
+  if (["已取消", "取消", "候选人拒绝"].includes(interview.status))
+    throw new Error("INTERVIEW_SCHEDULE_STATUS_INVALID");
+  const start = new Date(body.scheduledStartTime);
+  const end = new Date(body.scheduledEndTime);
+  if (start <= new Date()) throw new Error("INTERVIEW_TIME_PAST");
+  const profileId = body.interviewerId || interview.interviewerProfileId;
+  if (!profileId) throw new Error("INTERVIEWER_NOT_FOUND");
+  const profile = await prisma.interviewerProfile.findUnique({
+    where: { id: profileId },
+    include: { user: true },
+  });
+  if (!profile) throw new Error("INTERVIEWER_NOT_FOUND");
+  const suffix = start.toISOString().replace(/[^0-9]/g, "");
+  await prisma.$transaction(async (tx) => {
+    await assertInterviewerAvailable(tx, profile, start, end, {
+      businessLine: interview.application!.businessLine,
+      positionId: interview.application!.positionId,
+      excludeInterviewId: interview.id,
+    });
+    const updated = await tx.interview.updateMany({
+      where: { id: interview.id, updatedAt: interview.updatedAt },
+      data: {
+        scheduledStartTime: start,
+        scheduledEndTime: end,
+        feedbackDueAt: feedbackDueAt(end),
+        interviewerProfileId: profile.id,
+        interviewer: profile.user.name,
+        status: "待面试",
+      },
+    });
+    if (updated.count !== 1) throw new Error("INTERVIEW_CONCURRENT_UPDATE");
+    await tx.tencentMeetingRecord.updateMany({
+      where: { interviewId: interview.id },
+      data: { scheduledAt: start, interviewer: profile.user.name, status: "RESCHEDULED" },
+    });
+    await createInterviewNotifications(tx, {
+      type: "INTERVIEW_RESCHEDULED",
+      title: "面试改期通知",
+      content: `【面试改期】${interview.application!.candidate.name} 改至 ${start.toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })}，面试官：${profile.user.name}`,
+      application: interview.application!,
+      interviewId: interview.id,
+      interviewerUserId: profile.user.id,
+      idempotencySuffix: suffix,
+    });
+    await tx.operationLog.create({
+      data: {
+        module: "面试",
+        action: "面试改期",
+        candidateId: interview.candidateId,
+        applicationId: interview.applicationId,
+        supplierId: interview.supplierId,
+        businessLine: interview.businessLine,
+        oldValue: json({
+          start: interview.scheduledStartTime,
+          end: interview.scheduledEndTime,
+          interviewerId: interview.interviewerProfileId,
+        }),
+        newValue: json({ start, end, interviewerId: profile.id }),
+        operatorId: req.auth!.id,
+        operator: req.auth!.name,
+        reason: body.reason,
+      },
+    });
+  });
+  if (interview.meetingId) {
+    try {
+      await meetingClient.updateMeeting(interview.meetingId, {
+        startTime: start.toISOString(),
+        endTime: end.toISOString(),
+      });
+    } catch {
+      await prisma.tencentMeetingRecord.updateMany({
+        where: { interviewId: interview.id },
+        data: { status: "RESCHEDULE_SYNC_FAILED" },
+      });
+    }
+  }
+  const kimResult = await sendInterviewerKim(
+    profile.user.kimUserId,
+    "面试改期通知",
+    `${interview.application!.candidate.name} 改至 ${start.toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })}`,
+  );
+  await prisma.kimNotificationLog.updateMany({
+    where: { idempotencyKey: `INTERVIEW_RESCHEDULED-${interview.id}-${suffix}-kim` },
+    data: { status: kimResult.success ? "SUCCESS" : "FAILED", errorMessage: kimResult.success ? null : kimResult.message },
+  });
+  return success(res, await findScopedInterview(req, interview.id));
+}));
+
+router.post("/workflow/interviews/:id/cancel", wrap(async (req, res) => {
+  assertPermission(req, FeaturePermission.INTERVIEW_SCHEDULE);
+  const body = z.object({ reason: z.string().trim().min(2) }).parse(req.body);
+  const interview = await findScopedInterview(req, String(req.params.id));
+  if (["已取消", "取消"].includes(interview.status)) return success(res, interview);
+  if (!interview.interviewerProfile) throw new Error("INTERVIEWER_NOT_FOUND");
+  const suffix = Date.now().toString();
+  await prisma.$transaction(async (tx) => {
+    const updated = await tx.interview.updateMany({
+      where: { id: interview.id, updatedAt: interview.updatedAt },
+      data: { status: "已取消", result: "取消" },
+    });
+    if (updated.count !== 1) throw new Error("INTERVIEW_CONCURRENT_UPDATE");
+    await tx.tencentMeetingRecord.updateMany({
+      where: { interviewId: interview.id },
+      data: { status: "CANCELLED" },
+    });
+    await createInterviewNotifications(tx, {
+      type: "INTERVIEW_CANCELLED",
+      title: "面试取消通知",
+      content: `【面试取消】${interview.application!.candidate.name} 原定 ${interview.scheduledStartTime.toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })} 的面试已取消，原因：${body.reason}`,
+      application: interview.application!,
+      interviewId: interview.id,
+      interviewerUserId: interview.interviewerProfile!.user.id,
+      idempotencySuffix: suffix,
+    });
+    await tx.operationLog.create({
+      data: {
+        module: "面试",
+        action: "取消面试",
+        candidateId: interview.candidateId,
+        applicationId: interview.applicationId,
+        supplierId: interview.supplierId,
+        businessLine: interview.businessLine,
+        oldValue: json({ status: interview.status, start: interview.scheduledStartTime }),
+        newValue: json({ status: "已取消" }),
+        operatorId: req.auth!.id,
+        operator: req.auth!.name,
+        reason: body.reason,
+      },
+    });
+  });
+  if (interview.meetingId) {
+    try {
+      await meetingClient.cancelMeeting(interview.meetingId, body.reason);
+    } catch {
+      await prisma.tencentMeetingRecord.updateMany({
+        where: { interviewId: interview.id },
+        data: { status: "CANCEL_SYNC_FAILED" },
+      });
+    }
+  }
+  const kimResult = await sendInterviewerKim(
+    interview.interviewerProfile.user.kimUserId,
+    "面试取消通知",
+    `${interview.application!.candidate.name} 的面试已取消，原因：${body.reason}`,
+  );
+  await prisma.kimNotificationLog.updateMany({
+    where: { idempotencyKey: `INTERVIEW_CANCELLED-${interview.id}-${suffix}-kim` },
+    data: { status: kimResult.success ? "SUCCESS" : "FAILED", errorMessage: kimResult.success ? null : kimResult.message },
+  });
+  return success(res, await findScopedInterview(req, interview.id));
 }));
 
 const proposedSlot = z.object({
@@ -282,6 +602,8 @@ const schedulingRequestBody = z.object({
 const schedulingTokenHash = (token: string) => createHash("sha256").update(token).digest("hex");
 
 router.post("/applications/:id/scheduling-requests", wrap(async (req, res) => {
+  assertSelfSchedulingEnabled();
+  assertPermission(req, FeaturePermission.INTERVIEW_SCHEDULE);
   const body = schedulingRequestBody.parse(req.body);
   const application = await findApplication(req, String(req.params.id));
   if (!["待安排面试", "待面试", "面试待反馈"].includes(application.currentStatus))
@@ -353,6 +675,7 @@ async function findSchedulingRequest(token: string) {
 }
 
 router.get("/public/interview-scheduling/:token", wrap(async (req, res) => {
+  assertSelfSchedulingEnabled();
   const request = await findSchedulingRequest(String(req.params.token));
   if (request.status === SchedulingRequestStatus.EXPIRED) throw new Error("SCHEDULING_REQUEST_EXPIRED");
   if (request.status !== SchedulingRequestStatus.PENDING) throw new Error("SCHEDULING_REQUEST_STATUS_INVALID");
@@ -375,6 +698,7 @@ router.get("/public/interview-scheduling/:token", wrap(async (req, res) => {
 }));
 
 router.post("/public/interview-scheduling/:token/book", wrap(async (req, res) => {
+  assertSelfSchedulingEnabled();
   const body = z.object({ slotIndex: z.number().int().nonnegative() }).parse(req.body);
   const request = await findSchedulingRequest(String(req.params.token));
   if (request.status === SchedulingRequestStatus.EXPIRED) throw new Error("SCHEDULING_REQUEST_EXPIRED");
@@ -435,7 +759,7 @@ router.post("/public/interview-scheduling/:token/book", wrap(async (req, res) =>
 
   let meeting: unknown = null;
   try {
-    const createdMeeting = await createTencentMeetingClient().createMeeting({
+    const createdMeeting = await meetingClient.createMeeting({
       subject: `招聘面试｜${application.candidate.name}｜${application.position?.name || "招聘岗位"}｜${request.roundName}`,
       startTime: start.toISOString(),
       endTime: end.toISOString(),
@@ -473,12 +797,14 @@ const feedbackBody = z.object({
 });
 
 router.post("/workflow/interviews/:id/feedback", wrap(async (req, res) => {
+  assertPermission(req, FeaturePermission.FEEDBACK_SUBMIT);
   const body = feedbackBody.parse(req.body);
   const scope = scopeFor(req);
   const interview = await prisma.interview.findFirst({ where: {
     id: String(req.params.id),
-    ...(scope.supplierId ? { supplierId: scope.supplierId } : {}),
-    ...(scope.businessLine ? { businessLine: scope.businessLine } : {}),
+    ...(req.auth!.role === UserRole.INTERVIEWER
+      ? { interviewerProfileId: req.auth!.interviewerProfileId || "" }
+      : { application: applicationScopeWhere(scope) }),
   }, include: { application: { include: { position: true } } } });
   if (!interview?.application) throw new Error("INTERVIEW_NOT_FOUND");
   const template = feedbackTemplateConfig(interview.application.position?.feedbackTemplate);
@@ -560,11 +886,11 @@ router.post("/applications/:id/actions/conclude", wrap(async (req, res) => {
       create: { applicationId: application.id, finalResult: body.finalResult, finalLevel: body.finalLevel, roundSummary: json(roundSummary), decidedById: currentActor.id, decidedByName: currentActor.name },
     });
   });
-  return success(res, await findApplication(req, application.id));
+  return success(res, workflowPayload(req, await findApplication(req, application.id)));
 }));
 
 router.post("/applications/:id/offers", wrap(async (req, res) => {
-  assertInternalDecisionRole(req);
+  assertPermission(req, FeaturePermission.OFFER_MANAGE);
   const application = await findApplication(req, String(req.params.id));
   if (application.currentStatus !== "面试通过" || application.conclusion?.finalResult !== "通过")
     throw new Error("OFFER_PREREQUISITE_MISSING");
@@ -591,7 +917,7 @@ async function findOffer(req: Request, id: string) {
 }
 
 router.post("/workflow/offers/:id/actions/send", wrap(async (req, res) => {
-  assertInternalDecisionRole(req);
+  assertPermission(req, FeaturePermission.OFFER_MANAGE);
   const offer = await findOffer(req, String(req.params.id));
   if (offer.status !== OfferStatus.PENDING_INITIATION) throw new Error("OFFER_STATUS_INVALID");
   const currentActor = actor(req);
@@ -604,6 +930,7 @@ router.post("/workflow/offers/:id/actions/send", wrap(async (req, res) => {
 }));
 
 router.post("/workflow/offers/:id/actions/respond", wrap(async (req, res) => {
+  assertPermission(req, FeaturePermission.OFFER_MANAGE);
   const body = z.object({ response: z.enum(["CONFIRMED", "REJECTED"]), reason: z.string().trim().optional() }).parse(req.body);
   const offer = await findOffer(req, String(req.params.id));
   if (offer.status !== OfferStatus.SENT) throw new Error("OFFER_STATUS_INVALID");
@@ -618,7 +945,7 @@ router.post("/workflow/offers/:id/actions/respond", wrap(async (req, res) => {
 }));
 
 router.post("/workflow/offers/:id/actions/expire", wrap(async (req, res) => {
-  assertInternalDecisionRole(req);
+  assertPermission(req, FeaturePermission.OFFER_MANAGE);
   const offer = await findOffer(req, String(req.params.id));
   if (!new Set<OfferStatus>([OfferStatus.PENDING_INITIATION, OfferStatus.SENT]).has(offer.status))
     throw new Error("OFFER_STATUS_INVALID");
@@ -628,6 +955,7 @@ router.post("/workflow/offers/:id/actions/expire", wrap(async (req, res) => {
 }));
 
 router.post("/applications/:id/level-adjustments", wrap(async (req, res) => {
+  assertPermission(req, FeaturePermission.LEVEL_ADJUSTMENT_REQUEST);
   const body = z.object({ requestedLevel: z.string().trim().min(1), reason: z.string().trim().min(2) }).parse(req.body);
   const application = await findApplication(req, String(req.params.id)), currentActor = actor(req);
   if (application.levelAdjustments.some((item) => item.status === LevelAdjustmentStatus.PENDING))
@@ -667,6 +995,7 @@ router.post("/workflow/level-adjustments/:id/review", wrap(async (req, res) => {
 }));
 
 router.post("/applications/:id/actions/confirm-onboarding", wrap(async (req, res) => {
+  assertPermission(req, FeaturePermission.ONBOARDING_CONFIRM);
   const body = z.object({
     result: z.enum(["CONFIRMED", "DECLINED"]),
     entryDate: z.string().datetime({ offset: true }).optional(),
@@ -722,7 +1051,7 @@ router.post("/applications/:id/actions/confirm-onboarding", wrap(async (req, res
       },
     });
   });
-  return success(res, await findApplication(req, application.id));
+  return success(res, workflowPayload(req, await findApplication(req, application.id)));
 }));
 
 async function findReceptionTask(req: Request, id: string) {
@@ -733,25 +1062,28 @@ async function findReceptionTask(req: Request, id: string) {
 }
 
 router.get("/reception-tasks", wrap(async (req, res) => {
+  assertPermission(req, FeaturePermission.RECEPTION_VIEW);
   const scope = scopeFor(req);
   const status = req.query.status === undefined
     ? undefined
     : z.nativeEnum(ReceptionTaskStatus).parse(req.query.status);
   const rows = await prisma.receptionTask.findMany({
     where: { application: applicationScopeWhere(scope), ...(status ? { status } : {}) },
-    include: { checklist: { orderBy: { sortOrder: "asc" } }, application: { include: { candidate: true, supplier: true, position: true } } },
+    include: { checklist: { orderBy: { sortOrder: "asc" } }, application: { include: { candidate: { select: { id: true, name: true, candidateNo: true, phoneMasked: true, emailMasked: true } }, supplier: true, position: true } } },
     orderBy: { dueAt: "asc" },
   });
   return success(res, rows);
 }));
 
 router.put("/reception-tasks/:id/assignee", wrap(async (req, res) => {
+  assertInternalDecisionRole(req);
   const body = z.object({ assigneeId: z.string().optional().nullable(), assigneeName: z.string().trim().min(1) }).parse(req.body);
   const task = await findReceptionTask(req, String(req.params.id));
   return success(res, await prisma.receptionTask.update({ where: { id: task.id }, data: { assigneeId: body.assigneeId, assigneeName: body.assigneeName } }));
 }));
 
 router.post("/reception-tasks/:id/checklist/:itemId/toggle", wrap(async (req, res) => {
+  assertInternalDecisionRole(req);
   const body = z.object({ completed: z.boolean() }).parse(req.body);
   const task = await findReceptionTask(req, String(req.params.id));
   const item = task.checklist.find((candidate) => candidate.id === String(req.params.itemId));
@@ -770,6 +1102,7 @@ router.post("/reception-tasks/:id/checklist/:itemId/toggle", wrap(async (req, re
 }));
 
 router.post("/reception-tasks/:id/actions/complete", wrap(async (req, res) => {
+  assertInternalDecisionRole(req);
   const body = z.object({ actualEntryDate: z.string().datetime({ offset: true }).optional() }).parse(req.body);
   const task = await findReceptionTask(req, String(req.params.id));
   if (task.checklist.some((item) => item.required && !item.completed)) throw new Error("RECEPTION_CHECKLIST_INCOMPLETE");
@@ -784,11 +1117,13 @@ router.post("/reception-tasks/:id/actions/complete", wrap(async (req, res) => {
 }));
 
 router.get("/saved-filters", wrap(async (req, res) => {
+  assertPermission(req, FeaturePermission.SCREENING_SUBMIT);
   const module = String(req.query.module || "AI_SCREENING");
   return success(res, await prisma.savedFilter.findMany({ where: { userId: req.auth!.id, module }, orderBy: { updatedAt: "desc" } }));
 }));
 
 router.post("/saved-filters", wrap(async (req, res) => {
+  assertPermission(req, FeaturePermission.SCREENING_SUBMIT);
   const body = z.object({ module: z.string().min(1), name: z.string().trim().min(1), filters: z.record(z.string(), z.unknown()) }).parse(req.body);
   return success(res, await prisma.savedFilter.upsert({
     where: { userId_module_name: { userId: req.auth!.id, module: body.module, name: body.name } },
@@ -798,6 +1133,7 @@ router.post("/saved-filters", wrap(async (req, res) => {
 }));
 
 router.delete("/saved-filters/:id", wrap(async (req, res) => {
+  assertPermission(req, FeaturePermission.SCREENING_SUBMIT);
   const deleted = await prisma.savedFilter.deleteMany({ where: { id: String(req.params.id), userId: req.auth!.id } });
   if (!deleted.count) throw new Error("SAVED_FILTER_NOT_FOUND");
   return success(res, { id: req.params.id });
@@ -847,6 +1183,7 @@ router.post("/workflow/feedback-reminders/scan", wrap(async (req, res) => {
 }));
 
 router.get("/workflow/feedback-template", wrap(async (req, res) => {
+  assertPermission(req, FeaturePermission.FEEDBACK_VIEW);
   const position = req.query.positionId
     ? await prisma.jobPosition.findUnique({ where: { id: String(req.query.positionId) }, select: { feedbackTemplate: true } })
     : null;

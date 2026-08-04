@@ -20,6 +20,7 @@ export interface WorkflowInterview {
   round: number;
   roundName?: string | null;
   interviewer?: string | null;
+  interviewerProfileId?: string | null;
   scheduledStartTime: string;
   scheduledEndTime?: string | null;
   feedbackDueAt?: string | null;
@@ -68,7 +69,7 @@ export interface WorkflowDetail {
   interviewResult?: string | null;
   expectedEntryDate?: string | null;
   actualEntryDate?: string | null;
-  candidate: { id: string; candidateNo: string; name: string; phoneMasked?: string | null; emailMasked?: string | null };
+  candidate: { id: string; candidateNo: string; name: string; phone?: string | null; email?: string | null; phoneMasked?: string | null; emailMasked?: string | null };
   supplier: { id: string; name: string; code: string };
   position?: { id: string; name: string; feedbackTemplate?: unknown } | null;
   interviews: WorkflowInterview[];
@@ -99,8 +100,12 @@ export const workflowApi = {
     api<WorkflowDetail>(`/api/workflow/applications/${id}${businessLine ? `?businessLine=${businessLine}` : ""}`),
   transition: (id: string, targetStatus: string, reason: string) =>
     api<WorkflowDetail>(`/api/applications/${id}/actions/transition`, jsonRequest("POST", { targetStatus, reason })),
-  scheduleInterview: (id: string, body: { scheduledStartTime: string; scheduledEndTime: string; round: number; roundName: string; interviewer: string }) =>
+  scheduleInterview: (id: string, body: { scheduledStartTime: string; scheduledEndTime: string; round: number; roundName: string; interviewerId: string }) =>
     api(`/api/applications/${id}/interviews`, jsonRequest("POST", body)),
+  rescheduleInterview: (id: string, body: { scheduledStartTime: string; scheduledEndTime: string; interviewerId?: string; reason: string }) =>
+    api(`/api/workflow/interviews/${id}/schedule`, jsonRequest("PUT", body)),
+  cancelInterview: (id: string, reason: string) =>
+    api(`/api/workflow/interviews/${id}/cancel`, jsonRequest("POST", { reason })),
   createSchedulingRequest: (id: string, body: { interviewer: string; round: number; roundName: string; slots: Array<{ start: string; end: string }>; expiresInHours?: number }) =>
     api<{ id: string; bookingUrl: string; expiresAt: string }>(`/api/applications/${id}/scheduling-requests`, jsonRequest("POST", body)),
   submitFeedback: (interviewId: string, body: { templateVersion: string; dimensionScores: Record<string, number>; comment: string }) =>

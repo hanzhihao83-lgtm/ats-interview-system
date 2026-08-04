@@ -1,6 +1,11 @@
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import type { NextFunction, Request, Response } from "express";
-import { RecordStatus, type UserRole } from "@prisma/client";
+import {
+  FeaturePermission,
+  RecordStatus,
+  UserRole,
+  type BusinessLine,
+} from "@prisma/client";
 import { prisma } from "./database.js";
 
 export type AuthUser = {
@@ -10,6 +15,17 @@ export type AuthUser = {
   role: UserRole;
   supplierId: string | null;
   supplierName: string | null;
+  isSupplierManager: boolean;
+  permissions: FeaturePermission[];
+  businessLines: BusinessLine[];
+  kimUserId: string | null;
+  interviewerProfileId: string | null;
+  simulation: {
+    supplierId: string;
+    supplierName: string;
+    permissions: FeaturePermission[];
+    businessLines: BusinessLine[];
+  } | null;
 };
 
 declare global {
@@ -26,6 +42,37 @@ export const supplierRoles = new Set<UserRole>([
   "SUPPLIER_RECRUITER",
 ]);
 export const isSupplierUser = (req: Request) => Boolean(req.auth && supplierRoles.has(req.auth.role));
+export const isSimulationMode = (req: Request) => Boolean(req.auth?.simulation);
+export const ALL_FEATURE_PERMISSIONS = Object.values(FeaturePermission);
+
+export function hasPermission(req: Request, permission: FeaturePermission) {
+  if (!req.auth) return false;
+  if (req.auth.simulation)
+    return req.auth.simulation.permissions.includes(permission);
+  if (req.auth.role === UserRole.PLATFORM_ADMIN) return true;
+  return req.auth.permissions.includes(permission);
+}
+
+export function assertPermission(req: Request, permission: FeaturePermission) {
+  if (!hasPermission(req, permission)) {
+    const error = new Error("FEATURE_PERMISSION_FORBIDDEN") as Error & { permission?: FeaturePermission };
+    error.permission = permission;
+    throw error;
+  }
+}
+
+export const requirePermission = (permission: FeaturePermission) =>
+  (req: Request, res: Response, next: NextFunction) => {
+    if (!hasPermission(req, permission))
+      return res.status(403).json({
+        success: false,
+        code: "FEATURE_PERMISSION_FORBIDDEN",
+        message: "当前账号没有执行此功能的权限",
+        permission,
+        requestId: res.locals.requestId,
+      });
+    next();
+  };
 export const hashToken = (token: string) => createHash("sha256").update(token).digest("hex");
 
 export function hashPassword(password: string) {
@@ -59,13 +106,49 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
   const tokenHash = hashToken(token);
   const session = await prisma.authSession.findUnique({
     where: { tokenHash },
-    include: { user: { include: { supplier: { select: { name: true } } } } },
+    include: {
+      user: {
+        include: {
+          supplier: { select: { name: true, permissionCap: true, businessLines: true } },
+          interviewerProfile: { select: { id: true } },
+        },
+      },
+    },
   }).catch(() => null);
   if (!session || session.expiresAt <= new Date() || session.user.status !== RecordStatus.ACTIVE) {
     if (session) await prisma.authSession.delete({ where: { id: session.id } }).catch(() => undefined);
     return res.status(401).json({ success: false, code: "AUTH_EXPIRED", message: "登录已过期，请重新登录", requestId: res.locals.requestId });
   }
   req.authTokenHash = tokenHash;
+  const simulationSupplierId = req.header("x-simulate-supplier-id")?.trim() || null;
+  if (simulationSupplierId && session.user.role !== UserRole.PLATFORM_ADMIN)
+    return res.status(403).json({
+      success: false,
+      code: "SIMULATION_FORBIDDEN",
+      message: "只有平台管理员可以模拟外包公司视角",
+      requestId: res.locals.requestId,
+    });
+  const simulatedSupplier = simulationSupplierId
+    ? await prisma.supplier.findFirst({
+        where: { id: simulationSupplierId, status: RecordStatus.ACTIVE },
+        select: { id: true, name: true, permissionCap: true, businessLines: true },
+      })
+    : null;
+  if (simulationSupplierId && !simulatedSupplier)
+    return res.status(404).json({
+      success: false,
+      code: "SUPPLIER_NOT_FOUND",
+      message: "模拟的外包公司不存在",
+      requestId: res.locals.requestId,
+    });
+  if (simulatedSupplier && !["GET", "HEAD", "OPTIONS"].includes(req.method))
+    return res.status(403).json({
+      success: false,
+      code: "SIMULATION_READ_ONLY",
+      message: "模拟外包公司视角时只能查看，不能修改数据",
+      requestId: res.locals.requestId,
+    });
+
   req.auth = {
     id: session.user.id,
     email: session.user.email,
@@ -73,6 +156,19 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
     role: session.user.role,
     supplierId: session.user.supplierId,
     supplierName: session.user.supplier?.name || null,
+    isSupplierManager: session.user.isSupplierManager,
+    permissions: session.user.permissions,
+    businessLines: session.user.businessLines,
+    kimUserId: session.user.kimUserId,
+    interviewerProfileId: session.user.interviewerProfile?.id || null,
+    simulation: simulatedSupplier
+      ? {
+          supplierId: simulatedSupplier.id,
+          supplierName: simulatedSupplier.name,
+          permissions: simulatedSupplier.permissionCap,
+          businessLines: simulatedSupplier.businessLines,
+        }
+      : null,
   };
   if (Date.now() - session.lastUsedAt.getTime() > 300_000)
     void prisma.authSession.update({ where: { id: session.id }, data: { lastUsedAt: new Date() } }).catch(() => undefined);

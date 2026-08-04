@@ -73,7 +73,6 @@ import { generateDailyReport } from "./utils/report";
 import { exportDashboardExcel } from "./utils/exportExcel";
 import { buildRecruitmentSummaryRows } from "./utils/recruitmentSummary";
 import ResumeScreeningPage from "./pages/ResumeScreeningPage";
-import InterviewBookingButton from "./components/InterviewBookingButton";
 import CandidateImportPage from "./pages/CandidateImportPage";
 import AutoDashboardUploadPage from "./pages/AutoDashboardUploadPage";
 import RecruitmentResultDashboardPage from "./pages/RecruitmentResultDashboardPage";
@@ -545,9 +544,9 @@ export default function App() {
         <Space wrap>
           <Tag color="blue">{user?.supplierName || (user ? roleLabels[user.role] : "")}</Tag>
           {user && canAccessCombinedRecruitment(user.role) && <Button onClick={() => { history.pushState({}, "", "/dashboard"); dispatchEvent(new PopStateEvent("popstate")); }}>综合招聘</Button>}
-          {user && canAccessBusinessLine(user.role, "VIDEO") && <Button onClick={() => { history.pushState({}, "", "/video/dashboard"); dispatchEvent(new PopStateEvent("popstate")); }}>视频招聘</Button>}
-          {user && canAccessBusinessLine(user.role, "AUDIO") && <Button onClick={() => { history.pushState({}, "", "/audio/dashboard"); dispatchEvent(new PopStateEvent("popstate")); }}>音频招聘</Button>}
-          {user && ["PLATFORM_ADMIN", "SUPPLIER_ADMIN"].includes(user.role) && <Button icon={<SettingOutlined />} onClick={() => { history.pushState({}, "", "/admin/users"); window.dispatchEvent(new PopStateEvent("popstate")); }}>账号管理</Button>}
+          {user && canAccessBusinessLine(user.role, "VIDEO", user.simulation?.businessLines || user.businessLines) && <Button onClick={() => { history.pushState({}, "", "/video/dashboard"); dispatchEvent(new PopStateEvent("popstate")); }}>视频招聘</Button>}
+          {user && canAccessBusinessLine(user.role, "AUDIO", user.simulation?.businessLines || user.businessLines) && <Button onClick={() => { history.pushState({}, "", "/audio/dashboard"); dispatchEvent(new PopStateEvent("popstate")); }}>音频招聘</Button>}
+          {user && (user.role === "PLATFORM_ADMIN" || user.isSupplierManager) && <Button icon={<SettingOutlined />} onClick={() => { history.pushState({}, "", "/admin/users"); window.dispatchEvent(new PopStateEvent("popstate")); }}>账号管理</Button>}
           <Button
             icon={<FileSearchOutlined />}
             onClick={() => setScreeningOpen(true)}

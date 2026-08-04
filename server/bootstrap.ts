@@ -1,4 +1,4 @@
-import { UserRole } from "@prisma/client";
+import { BusinessLine, FeaturePermission, UserRole } from "@prisma/client";
 import { hashPassword } from "./auth.js";
 import { prisma } from "./database.js";
 
@@ -22,7 +22,12 @@ export async function ensureBootstrapAdmin() {
     await prisma.$transaction([
       prisma.user.update({
         where: { id: existing.id },
-        data: { passwordHash: hashPassword(password), status: "ACTIVE" },
+        data: {
+          passwordHash: hashPassword(password),
+          status: "ACTIVE",
+          permissions: Object.values(FeaturePermission),
+          businessLines: [BusinessLine.VIDEO, BusinessLine.AUDIO],
+        },
       }),
       prisma.authSession.deleteMany({ where: { userId: existing.id } }),
     ]);
@@ -34,6 +39,8 @@ export async function ensureBootstrapAdmin() {
     name: process.env.BOOTSTRAP_ADMIN_NAME || "平台管理员",
     role: UserRole.PLATFORM_ADMIN,
     passwordHash: hashPassword(password),
+    permissions: Object.values(FeaturePermission),
+    businessLines: [BusinessLine.VIDEO, BusinessLine.AUDIO],
   }});
   console.log("已安全初始化平台管理员账号");
 }

@@ -17,11 +17,13 @@ import {
   HandlingAction,
   ImportRowStatus,
   ImportTaskStatus,
+  FeaturePermission,
   Prisma,
+  UserRole,
   ValidationStatus,
 } from "@prisma/client";
 import { prisma } from "./database.js";
-import { assertSupplierIdentity, isSupplierUser, supplierIdFor, supplierNameFor } from "./auth.js";
+import { assertPermission, assertSupplierIdentity, isSupplierUser, supplierIdFor, supplierNameFor } from "./auth.js";
 import { buildDataScope, parseBusinessLine } from "./dataScopeService.js";
 import { classifyBusinessLine } from "./importClassificationService.js";
 import { assertWorkflowStatus, assertWorkflowTransition } from "./workflowService.js";
@@ -354,13 +356,22 @@ const success = (res: Response, data: unknown, status = 200) =>
 const taskAccessWhere = (req: Request, id?: string) => ({
   ...(id ? { id } : {}),
   ...(isSupplierUser(req) ? { supplierId: req.auth!.supplierId! } : {}),
+  ...(isSupplierUser(req) && !req.auth!.isSupplierManager ? { createdById: req.auth!.id } : {}),
 });
 async function assertTaskAccess(req: Request) {
   const task = await prisma.candidateImportTask.findFirst({ where: taskAccessWhere(req, req.params.taskId) });
   if (!task) throw new Error("IMPORT_TASK_NOT_FOUND");
   return task;
 }
-const candidateScope = (req: Request) => isSupplierUser(req) ? { supplierId: req.auth!.supplierId! } : {};
+const candidateScope = (req: Request) => isSupplierUser(req) ? {
+  applications: {
+    some: {
+      supplierId: req.auth!.supplierId!,
+      deletedAt: null,
+      ...(req.auth!.isSupplierManager ? {} : { ownerId: req.auth!.id }),
+    },
+  },
+} : {};
 
 export async function cleanupExpiredImportFiles(retentionDays = 7) {
   const before = new Date(Date.now() - retentionDays * 86_400_000);
@@ -564,14 +575,13 @@ router.post(
   "/imports/candidates/upload",
   uploader.single("file"),
   wrap(async (req, res) => {
+    assertPermission(req, FeaturePermission.CANDIDATE_IMPORT);
     assertSupplierIdentity(req);
     if (!req.file) throw new Error("IMPORT_FILE_INVALID");
     const requestedLine = ["", "COMBINED", "综合"].includes(String(req.body.businessLine || "").trim().toUpperCase())
       ? undefined
       : parseBusinessLine(req.body.businessLine);
     const importScope = buildDataScope(req.auth!, clean(req.body.supplierId), requestedLine);
-    if (isSupplierUser(req) && req.auth!.role === "SUPPLIER_ADMIN" && !importScope.businessLine)
-      throw new Error("DATA_SCOPE_FORBIDDEN");
     const bytes = fs.readFileSync(req.file.path);
     const hash = createHash("sha256").update(bytes).digest("hex");
     const prior = await prisma.candidateImportTask.findFirst({
@@ -587,6 +597,7 @@ router.post(
         fileHash: hash,
         fileSize: req.file.size,
         uploadedBy: req.auth!.name,
+        createdById: req.auth!.id,
         supplierId: importScope.supplierId || null,
         businessLine: importScope.businessLine || null,
         defaultSupplierId: importScope.supplierId || null,
@@ -1133,6 +1144,7 @@ router.post(
                 expectedEntryDate: asDate(data.expectedEntryDate),
                 actualEntryDate: asDate(data.actualEntryDate),
                 createdById: req.auth!.id,
+                ownerId: req.auth!.id,
                 businessData: detectedBusinessLine === BusinessLine.UNCLASSIFIED ? json({ classificationStatus: "待归类", sourceSheet: accessTask.sheetName }) : undefined,
               },
             });
@@ -1448,6 +1460,7 @@ const candidateBody = z.object({
 router.post(
   "/candidates",
   wrap(async (req, res) => {
+    assertPermission(req, FeaturePermission.CANDIDATE_CREATE);
     const body = candidateBody.parse(req.body);
     assertWorkflowStatus(body.currentStatus);
     if (!["简历待筛选", "待安排面试"].includes(body.currentStatus))
@@ -1524,6 +1537,29 @@ router.post(
           remark: "手工创建",
         },
       });
+      const businessLine = classifyBusinessLine(null, position.name);
+      if (businessLine === BusinessLine.UNCLASSIFIED)
+        throw new Error("BUSINESS_LINE_REQUIRED");
+      if (
+        req.auth!.businessLines.length > 0 &&
+        !req.auth!.businessLines.includes(businessLine)
+      )
+        throw new Error("SCOPE_BUSINESS_LINE_FORBIDDEN");
+      await tx.candidateApplication.create({
+        data: {
+          applicationNo: `APP-${businessLine}-${Date.now()}-${randomBytes(3).toString("hex")}`,
+          candidateId: created.id,
+          supplierId: supplier.id,
+          businessLine,
+          positionId: position.id,
+          projectName: body.projectName,
+          currentStatus: created.currentStatus,
+          expectedEntryDate: asDate(body.expectedEntryDate),
+          actualEntryDate: asDate(body.actualEntryDate),
+          createdById: req.auth!.id,
+          ownerId: req.auth!.id,
+        },
+      });
       return created;
     });
     return success(
@@ -1539,12 +1575,18 @@ router.post(
 router.put(
   "/candidates/:id",
   wrap(async (req, res) => {
+    assertPermission(req, FeaturePermission.CANDIDATE_EDIT);
     const old = await prisma.candidate.findFirst({
       where: { id: req.params.id, deletedAt: null, ...candidateScope(req) },
     });
     if (!old) throw new Error("CANDIDATE_NOT_FOUND");
     const body = candidateBody.partial().parse(req.body);
-    if (body.currentStatus !== undefined) assertWorkflowTransition(old.currentStatus, body.currentStatus);
+    if (
+      body.currentStatus !== undefined ||
+      body.expectedEntryDate !== undefined ||
+      body.actualEntryDate !== undefined
+    )
+      throw new Error("WORKFLOW_ACTION_REQUIRED");
     const {
       supplierName: _supplierName,
       positionName: _positionName,
@@ -1585,23 +1627,10 @@ router.put(
           updatedBy: req.auth!.name,
         },
       });
-      if (body.currentStatus && body.currentStatus !== old.currentStatus)
-        await tx.candidateStatusEvent.create({
-          data: {
-            candidateId: old.id,
-            status: body.currentStatus,
-            effectiveAt: new Date(),
-            operator: req.auth!.name,
-            remark: body.remark || "修改候选人状态",
-          },
-        });
       await tx.operationLog.create({
         data: {
           module: "候选人",
-          action:
-            body.currentStatus !== old.currentStatus
-              ? "修改候选人状态"
-              : "更新候选人",
+          action: "更新候选人基本资料",
           candidateId: old.id,
           oldValue: json({ currentStatus: old.currentStatus }),
           newValue: json({ currentStatus: candidate.currentStatus }),
@@ -1623,6 +1652,8 @@ router.put(
 router.delete(
   "/candidates/:id",
   wrap(async (req, res) => {
+    if (req.auth!.role !== UserRole.PLATFORM_ADMIN)
+      throw new Error("WORKFLOW_ACTION_FORBIDDEN");
     const updated = await prisma.candidate.updateMany({
       where: { id: req.params.id, deletedAt: null, ...candidateScope(req) },
       data: {

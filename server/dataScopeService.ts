@@ -6,6 +6,8 @@ import type { AuthUser } from "./auth.js";
 export interface DataScope {
   supplierId?: string;
   businessLine?: BusinessLine;
+  businessLines?: BusinessLine[];
+  ownerId?: string;
 }
 
 export class ScopeForbiddenError extends Error {
@@ -33,24 +35,47 @@ export function buildDataScope(
   requestedSupplierId?: string | null,
   requestedBusinessLine?: BusinessLine | null,
 ): DataScope {
-  const supplierScoped = supplierRoles.has(currentUser.role);
-  if (supplierScoped && !currentUser.supplierId)
+  const simulation = currentUser.simulation;
+  const supplierScoped = supplierRoles.has(currentUser.role) || Boolean(simulation);
+  const effectiveSupplierId = simulation?.supplierId || currentUser.supplierId;
+  if (supplierScoped && !effectiveSupplierId)
     throw new ScopeForbiddenError("供应商账号未绑定供应商");
-  if (supplierScoped && requestedSupplierId && requestedSupplierId !== currentUser.supplierId)
+  if (supplierScoped && requestedSupplierId && requestedSupplierId !== effectiveSupplierId)
     throw new ScopeForbiddenError("不能访问其他供应商数据");
 
   const forcedLine = forcedBusinessLine(currentUser.role);
   if (forcedLine && requestedBusinessLine && requestedBusinessLine !== forcedLine)
     throw new ScopeForbiddenError("不能访问其他业务部门数据");
 
+  const configuredLines = simulation?.businessLines.length
+    ? simulation.businessLines
+    : currentUser.businessLines.length
+      ? currentUser.businessLines
+      : forcedLine
+        ? [forcedLine]
+        : [];
+  if (
+    requestedBusinessLine &&
+    configuredLines.length &&
+    !configuredLines.includes(requestedBusinessLine)
+  )
+    throw new ScopeForbiddenError("当前账号没有该业务部门权限");
+
   if (requestedBusinessLine === BusinessLine.UNCLASSIFIED && supplierScoped)
     throw new ScopeForbiddenError("供应商账号不能访问待归类数据");
 
   const result: DataScope = {};
-  const supplierId = supplierScoped ? currentUser.supplierId! : requestedSupplierId || undefined;
+  const supplierId = supplierScoped ? effectiveSupplierId! : requestedSupplierId || undefined;
   const businessLine = forcedLine || requestedBusinessLine || undefined;
   if (supplierId) result.supplierId = supplierId;
   if (businessLine) result.businessLine = businessLine;
+  else if (configuredLines.length) result.businessLines = configuredLines;
+  if (
+    supplierRoles.has(currentUser.role) &&
+    !currentUser.isSupplierManager &&
+    !simulation
+  )
+    result.ownerId = currentUser.id;
   return result;
 }
 
@@ -58,6 +83,8 @@ export const applicationScopeWhere = (scope: DataScope): Prisma.CandidateApplica
   deletedAt: null,
   ...(scope.supplierId ? { supplierId: scope.supplierId } : {}),
   ...(scope.businessLine ? { businessLine: scope.businessLine } : {}),
+  ...(scope.businessLines ? { businessLine: { in: scope.businessLines } } : {}),
+  ...(scope.ownerId ? { ownerId: scope.ownerId } : {}),
 });
 
 export const canAccessCombined = (role: UserRole) => role !== UserRole.VIDEO_RECRUITER && role !== UserRole.AUDIO_RECRUITER && role !== UserRole.SUPPLIER_VIDEO_RECRUITER && role !== UserRole.SUPPLIER_AUDIO_RECRUITER;

@@ -22,6 +22,7 @@ enum UserRole {
   SUPPLIER_VIDEO_RECRUITER
   SUPPLIER_AUDIO_RECRUITER
   SUPPLIER_RECRUITER
+  INTERVIEWER
 }
 
 enum BusinessLine {
@@ -113,6 +114,39 @@ enum SchedulingRequestStatus {
   CANCELLED
 }
 
+enum FeaturePermission {
+  CANDIDATE_VIEW
+  CANDIDATE_CREATE
+  CANDIDATE_IMPORT
+  CANDIDATE_EDIT
+  CANDIDATE_CONTACT_VIEW
+  SCREENING_SUBMIT
+  INTERVIEW_VIEW
+  INTERVIEW_SCHEDULE
+  FEEDBACK_VIEW
+  FEEDBACK_SUBMIT
+  LEVEL_ADJUSTMENT_REQUEST
+  OFFER_MANAGE
+  ONBOARDING_CONFIRM
+  RECEPTION_VIEW
+  DATA_EXPORT
+  SUPPLIER_ACCOUNT_MANAGE
+}
+
+enum CalendarBlockType {
+  LEAVE
+  INTERNAL_MEETING
+  TRAINING
+  LUNCH_BREAK
+  TEMPORARILY_UNAVAILABLE
+  OTHER
+}
+
+enum CalendarRecurrence {
+  SINGLE
+  WEEKLY
+}
+
 model Supplier {
   id               String                 @id @default(cuid())
   name             String
@@ -120,6 +154,8 @@ model Supplier {
   status           RecordStatus           @default(ACTIVE)
   createdAt        DateTime               @default(now())
   updatedAt        DateTime               @updatedAt
+  permissionCap    FeaturePermission[]    @default([])
+  businessLines    BusinessLine[]         @default([VIDEO, AUDIO])
   candidates       Candidate[]
   applications     CandidateApplication[]
   interviews       Interview[]
@@ -131,22 +167,30 @@ model Supplier {
 }
 
 model User {
-  id           String       @id @default(cuid())
-  email        String       @unique
-  name         String
-  passwordHash String
-  role         UserRole
-  supplierId   String?
-  status       RecordStatus @default(ACTIVE)
-  lastLoginAt  DateTime?
-  createdAt    DateTime     @default(now())
-  updatedAt    DateTime     @updatedAt
+  id                String              @id @default(cuid())
+  email             String              @unique
+  name              String
+  passwordHash      String
+  role              UserRole
+  supplierId        String?
+  isSupplierManager Boolean             @default(false)
+  permissions       FeaturePermission[] @default([])
+  businessLines     BusinessLine[]      @default([])
+  kimUserId         String?             @unique
+  status            RecordStatus        @default(ACTIVE)
+  lastLoginAt       DateTime?
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
 
-  supplier Supplier?     @relation(fields: [supplierId], references: [id])
-  sessions AuthSession[]
+  supplier           Supplier?              @relation(fields: [supplierId], references: [id])
+  sessions           AuthSession[]
+  ownedApplications  CandidateApplication[] @relation("ApplicationOwner")
+  interviewerProfile InterviewerProfile?
+  notifications      SiteNotification[]
 
   @@index([supplierId])
   @@index([role, status])
+  @@index([isSupplierManager, status])
 }
 
 model AuthSession {
@@ -244,6 +288,7 @@ model CandidateApplication {
   actualEntryDate   DateTime?
   businessData      Json?
   createdById       String?
+  ownerId           String?
   createdAt         DateTime     @default(now())
   updatedAt         DateTime     @updatedAt
   deletedAt         DateTime?
@@ -262,6 +307,8 @@ model CandidateApplication {
   onboarding         OnboardingConfirmation?
   receptionTask      ReceptionTask?
   schedulingRequests InterviewSchedulingRequest[]
+  owner              User?                        @relation("ApplicationOwner", fields: [ownerId], references: [id], onDelete: SetNull)
+  notifications      SiteNotification[]
 
   @@index([candidateId])
   @@index([supplierId])
@@ -269,6 +316,7 @@ model CandidateApplication {
   @@index([supplierId, businessLine])
   @@index([businessLine, currentStatus])
   @@index([supplierId, businessLine, currentStatus])
+  @@index([ownerId, businessLine, currentStatus])
 }
 
 model CandidateStatusEvent {
@@ -285,36 +333,87 @@ model CandidateStatusEvent {
 }
 
 model Interview {
-  id                 String                 @id @default(cuid())
-  candidateId        String
-  applicationId      String?
-  supplierId         String?
-  businessLine       BusinessLine?
-  round              Int                    @default(1)
-  roundName          String?
-  interviewer        String?
-  scheduledStartTime DateTime
-  scheduledEndTime   DateTime?
-  result             String?
-  status             String
-  meetingProvider    String?
-  meetingId          String?
-  meetingUrl         String?
-  feedback           String?
-  feedbackDueAt      DateTime?
-  createdAt          DateTime               @default(now())
-  updatedAt          DateTime               @updatedAt
-  candidate          Candidate              @relation(fields: [candidateId], references: [id])
-  application        CandidateApplication?  @relation(fields: [applicationId], references: [id])
-  supplier           Supplier?              @relation(fields: [supplierId], references: [id])
-  kimNotifications   KimNotificationLog[]
-  meetingRecords     TencentMeetingRecord[]
-  feedbackRecord     InterviewFeedback?
+  id                   String                 @id @default(cuid())
+  candidateId          String
+  applicationId        String?
+  supplierId           String?
+  businessLine         BusinessLine?
+  round                Int                    @default(1)
+  roundName            String?
+  interviewer          String?
+  interviewerProfileId String?
+  scheduledStartTime   DateTime
+  scheduledEndTime     DateTime?
+  result               String?
+  status               String
+  meetingProvider      String?
+  meetingId            String?
+  meetingUrl           String?
+  feedback             String?
+  feedbackDueAt        DateTime?
+  createdAt            DateTime               @default(now())
+  updatedAt            DateTime               @updatedAt
+  candidate            Candidate              @relation(fields: [candidateId], references: [id])
+  application          CandidateApplication?  @relation(fields: [applicationId], references: [id])
+  supplier             Supplier?              @relation(fields: [supplierId], references: [id])
+  kimNotifications     KimNotificationLog[]
+  meetingRecords       TencentMeetingRecord[]
+  feedbackRecord       InterviewFeedback?
+  interviewerProfile   InterviewerProfile?    @relation(fields: [interviewerProfileId], references: [id], onDelete: SetNull)
+  notifications        SiteNotification[]
 
   @@index([candidateId])
   @@index([applicationId])
   @@index([supplierId, businessLine])
   @@index([scheduledStartTime])
+  @@index([interviewerProfileId, scheduledStartTime])
+}
+
+model InterviewerProfile {
+  id              String         @id @default(cuid())
+  userId          String         @unique
+  department      String?
+  businessLines   BusinessLine[] @default([])
+  positionIds     String[]       @default([])
+  workingDays     Int[]          @default([1, 2, 3, 4, 5])
+  workStartMinute Int            @default(540)
+  workEndMinute   Int            @default(1260)
+  status          RecordStatus   @default(ACTIVE)
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  user           User                       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  interviews     Interview[]
+  calendarBlocks InterviewerCalendarBlock[]
+
+  @@index([status])
+}
+
+model InterviewerCalendarBlock {
+  id            String             @id @default(cuid())
+  interviewerId String
+  type          CalendarBlockType
+  title         String
+  reason        String?
+  recurrence    CalendarRecurrence @default(SINGLE)
+  startAt       DateTime?
+  endAt         DateTime?
+  weekday       Int?
+  startMinute   Int?
+  endMinute     Int?
+  effectiveFrom DateTime?
+  effectiveTo   DateTime?
+  status        RecordStatus       @default(ACTIVE)
+  createdById   String
+  createdByName String
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+
+  interviewer InterviewerProfile @relation(fields: [interviewerId], references: [id], onDelete: Cascade)
+
+  @@index([interviewerId, status])
+  @@index([startAt, endAt])
+  @@index([weekday, startMinute, endMinute])
 }
 
 model CandidateImportTask {
@@ -336,6 +435,7 @@ model CandidateImportTask {
   status            ImportTaskStatus     @default(UPLOADED)
   fieldMapping      Json?
   uploadedBy        String?
+  createdById       String?
   defaultSupplierId String?
   defaultPositionId String?
   supplierId        String?
@@ -353,6 +453,7 @@ model CandidateImportTask {
   @@index([uploadedAt])
   @@index([supplierId])
   @@index([businessLine])
+  @@index([createdById, uploadedAt])
 }
 
 model CandidateImportRow {
@@ -625,6 +726,7 @@ model ImportedDataset {
   warningCount     Int           @default(0)
   dashboardId      String?
   createdBy        String
+  createdById      String?
   supplierId       String?
   businessLine     BusinessLine?
   createdAt        DateTime      @default(now())
@@ -639,6 +741,7 @@ model ImportedDataset {
   @@index([createdAt])
   @@index([supplierId])
   @@index([businessLine])
+  @@index([createdById, createdAt])
 }
 
 model ImportedCandidate {
@@ -735,22 +838,44 @@ model AIResumeScreeningResult {
 }
 
 model KimNotificationLog {
-  id             String       @id @default(cuid())
-  applicationId  String
-  interviewId    String?
-  supplierId     String
-  businessLine   BusinessLine
-  status         String
-  messageSummary String?
-  errorMessage   String?
-  idempotencyKey String?      @unique
-  createdAt      DateTime     @default(now())
+  id              String       @id @default(cuid())
+  applicationId   String
+  interviewId     String?
+  supplierId      String
+  businessLine    BusinessLine
+  status          String
+  messageSummary  String?
+  errorMessage    String?
+  idempotencyKey  String?      @unique
+  recipientUserId String?
+  createdAt       DateTime     @default(now())
 
   application CandidateApplication @relation(fields: [applicationId], references: [id], onDelete: Cascade)
   interview   Interview?           @relation(fields: [interviewId], references: [id])
 
   @@index([applicationId])
   @@index([supplierId, businessLine])
+  @@index([interviewId])
+}
+
+model SiteNotification {
+  id             String    @id @default(cuid())
+  userId         String
+  type           String
+  title          String
+  content        String
+  applicationId  String?
+  interviewId    String?
+  idempotencyKey String    @unique
+  readAt         DateTime?
+  createdAt      DateTime  @default(now())
+
+  user        User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  application CandidateApplication? @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  interview   Interview?            @relation(fields: [interviewId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt, createdAt])
+  @@index([applicationId])
   @@index([interviewId])
 }
 

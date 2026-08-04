@@ -10,10 +10,13 @@ const apiBaseUrl = String(
   import.meta.env.PROD ? productionApiBaseUrl : import.meta.env.VITE_API_BASE_URL || "",
 ).replace(/\/$/, "");
 export const AUTH_TOKEN_KEY = "recruitment_auth_token";
+export const SIMULATED_SUPPLIER_KEY = "recruitment_simulated_supplier_id";
 export const apiUrl = (url: string) => `${apiBaseUrl}${url}`;
 export function authHeaders(headers?: HeadersInit) {
   const result = new Headers(headers || {}), token = localStorage.getItem(AUTH_TOKEN_KEY);
   if (token) result.set("Authorization", `Bearer ${token}`);
+  const simulatedSupplierId = localStorage.getItem(SIMULATED_SUPPLIER_KEY);
+  if (simulatedSupplierId) result.set("X-Simulate-Supplier-Id", simulatedSupplierId);
   return result;
 }
 export const authorizedFetch = (url: string, init?: RequestInit) => fetch(apiUrl(url), { ...init, headers: authHeaders(init?.headers) });

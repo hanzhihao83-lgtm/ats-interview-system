@@ -31,6 +31,8 @@ services:
         value: mock
       - key: KIM_SEND_MODE
         value: webhook
+      - key: CANDIDATE_SELF_SCHEDULING_ENABLED
+        value: "false"
 
 databases:
   - name: ats-recruitment-db

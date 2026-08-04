@@ -23,8 +23,9 @@ import autoDashboardRouter from "./autoDashboardRouter.js";
 import authRouter from "./authRouter.js";
 import businessRouter from "./businessRouter.js";
 import workflowRouter, { scanOverdueFeedbackReminders } from "./workflowRouter.js";
-import { isSupplierUser, requireAuth, requireRoles } from "./auth.js";
-import { UserRole } from "@prisma/client";
+import calendarRouter from "./calendarRouter.js";
+import { isSupplierUser, requireAuth, requirePermission, requireRoles } from "./auth.js";
+import { FeaturePermission, UserRole } from "@prisma/client";
 import { assertDatabaseConnection, prisma } from "./database.js";
 import { ensureBootstrapAdmin } from "./bootstrap.js";
 import { ScopeForbiddenError, writeScopeAudit } from "./dataScopeService.js";
@@ -62,7 +63,7 @@ const allowedOrigins = (process.env.FRONTEND_ORIGIN || "http://localhost:5173")
   .split(",")
   .map((origin) => origin.trim().replace(/\/$/, ""))
   .filter(Boolean);
-app.use(cors({ origin: (origin, callback) => callback(null, !origin || allowedOrigins.includes(origin.replace(/\/$/, ""))), allowedHeaders: ["Content-Type", "Authorization", "X-Request-Id"] }));
+app.use(cors({ origin: (origin, callback) => callback(null, !origin || allowedOrigins.includes(origin.replace(/\/$/, ""))), allowedHeaders: ["Content-Type", "Authorization", "X-Request-Id", "X-Simulate-Supplier-Id"] }));
 app.use(express.json({ limit: "1mb" }));
 app.use((req, res, next) => {
   const requestId = String(req.headers["x-request-id"] || randomUUID());
@@ -116,8 +117,10 @@ app.use("/api", (req, res, next) =>
     ? next()
     : requireAuth(req, res, next),
 );
+app.use("/api/imports", requirePermission(FeaturePermission.CANDIDATE_IMPORT));
 app.use("/api", businessRouter);
 app.use("/api", workflowRouter);
+app.use("/api", calendarRouter);
 app.use("/api", recruitmentRouter);
 app.use("/api/auto-dashboard", autoDashboardRouter);
 const send = (res: Response, status: number, body: object) =>
@@ -187,6 +190,8 @@ app.get("/api/ai/status", (_req, res) =>
 );
 app.post("/api/ai/resume-match", async (req, res) => {
   try {
+    requirePermission(FeaturePermission.SCREENING_SUBMIT)(req, res, () => undefined);
+    if (res.headersSent) return;
     const data = await matchResumeWithAi(req.body);
     return send(res, 200, { success: true, data });
   } catch (error) {
@@ -470,12 +475,43 @@ app.use(
       "APPLICATION_STATUS_TRANSITION_INVALID",
       "APPLICATION_ACTION_REQUIRED",
       "WORKFLOW_ACTION_FORBIDDEN",
+      "WORKFLOW_ACTION_REQUIRED",
+      "FEATURE_PERMISSION_FORBIDDEN",
+      "PERMISSION_CAP_EXCEEDED",
+      "BUSINESS_LINE_CAP_EXCEEDED",
+      "BUSINESS_LINE_REQUIRED",
+      "SCOPE_BUSINESS_LINE_FORBIDDEN",
+      "SUPPLIER_MANAGER_ROLE_INVALID",
+      "SUPPLIER_ACCOUNT_PERMISSION_INVALID",
+      "SUPPLIER_NOT_FOUND",
+      "AUTH_SUPPLIER_INVALID",
+      "APPLICATION_OWNER_ASSIGN_FORBIDDEN",
+      "APPLICATION_OWNER_INVALID",
       "INTERVIEW_APPLICATION_REQUIRED",
       "INTERVIEW_ACTION_REQUIRED",
       "INTERVIEW_NOT_FOUND",
       "INTERVIEW_TIME_INVALID",
       "INTERVIEW_TIME_PAST",
       "INTERVIEW_TIME_CONFLICT",
+      "INTERVIEW_CONCURRENT_UPDATE",
+      "INTERVIEWER_NOT_FOUND",
+      "INTERVIEWER_INACTIVE",
+      "INTERVIEWER_BUSINESS_LINE_MISMATCH",
+      "INTERVIEWER_POSITION_MISMATCH",
+      "INTERVIEWER_NON_WORKING_DAY",
+      "INTERVIEWER_OUTSIDE_WORKING_HOURS",
+      "INTERVIEWER_WORKING_TIME_INVALID",
+      "INTERVIEWER_SCOPE_FORBIDDEN",
+      "INTERVIEWER_UNAVAILABLE_BLOCK_CONFLICT",
+      "INTERVIEW_DURATION_INVALID",
+      "INTERVIEW_SLOT_GRANULARITY_INVALID",
+      "INTERVIEW_FIXED_BREAK_CONFLICT",
+      "CALENDAR_RANGE_INVALID",
+      "CALENDAR_RANGE_TOO_LARGE",
+      "CALENDAR_DATE_INVALID",
+      "CALENDAR_BLOCK_TIME_INVALID",
+      "CALENDAR_BLOCK_NOT_FOUND",
+      "NOTIFICATION_NOT_FOUND",
       "INTERVIEW_SCHEDULE_STATUS_INVALID",
       "INTERVIEW_RESULT_ACTION_REQUIRED",
       "INTERVIEW_FEEDBACK_INCOMPLETE",
@@ -502,6 +538,7 @@ app.use(
       "SCHEDULING_SLOT_INVALID",
       "SCHEDULING_SLOT_UNAVAILABLE",
       "SCHEDULING_REQUEST_ACTIVE_EXISTS",
+      "SCHEDULING_FEATURE_DISABLED",
     ]);
     const multerTooLarge = raw === "File too large";
     const code = multerTooLarge
@@ -531,9 +568,10 @@ app.use(
           "SCHEDULING_REQUEST_STATUS_INVALID",
           "SCHEDULING_SLOT_UNAVAILABLE",
           "SCHEDULING_REQUEST_ACTIVE_EXISTS",
+          "INTERVIEWER_UNAVAILABLE_BLOCK_CONFLICT",
         ]).has(code)
         ? 409
-        : code === "AUTH_SUPPLIER_REQUIRED" || code === "DATA_SCOPE_FORBIDDEN" || code === "WORKFLOW_ACTION_FORBIDDEN"
+        : code === "AUTH_SUPPLIER_REQUIRED" || code === "AUTH_SUPPLIER_INVALID" || code === "DATA_SCOPE_FORBIDDEN" || code === "SCOPE_BUSINESS_LINE_FORBIDDEN" || code === "WORKFLOW_ACTION_FORBIDDEN" || code === "FEATURE_PERMISSION_FORBIDDEN" || code === "PERMISSION_CAP_EXCEEDED" || code === "BUSINESS_LINE_CAP_EXCEEDED" || code === "APPLICATION_OWNER_ASSIGN_FORBIDDEN" || code === "INTERVIEWER_SCOPE_FORBIDDEN" || code === "SIMULATION_READ_ONLY"
           ? 403
         : code === "DATABASE_UNAVAILABLE"
           ? 503
@@ -565,6 +603,7 @@ app.use(
             AUTO_DASHBOARD_NO_DATA: "工作表中没有可用于生成看板的数据",
             AUTO_DASHBOARD_NOT_FOUND: "招聘结果看板不存在",
             AUTH_SUPPLIER_REQUIRED: "供应商账号尚未绑定供应商",
+            AUTH_SUPPLIER_INVALID: "内部账号不能绑定外包公司",
             DATA_SCOPE_FORBIDDEN: "当前账号无权访问该供应商或业务部门数据",
             APPLICATION_NOT_FOUND: "应聘记录不存在或不在当前数据范围内",
             APPLICATION_CANDIDATE_REQUIRED: "创建应聘记录需要候选人姓名和岗位",
@@ -572,13 +611,42 @@ app.use(
             APPLICATION_STATUS_INITIAL_INVALID: "新应聘记录必须从简历待筛选开始",
             APPLICATION_STATUS_TRANSITION_INVALID: "当前状态不允许执行该流转",
             APPLICATION_ACTION_REQUIRED: "状态、面试结论和入职日期必须通过对应流程动作修改",
+            APPLICATION_OWNER_ASSIGN_FORBIDDEN: "只有平台管理员或本公司负责人可以重新分配候选人负责人",
+            APPLICATION_OWNER_INVALID: "所选负责人不属于该公司或无该业务线权限",
             WORKFLOW_ACTION_FORBIDDEN: "当前角色无权执行该流程动作",
+            FEATURE_PERMISSION_FORBIDDEN: "当前账号没有执行此功能的权限",
+            PERMISSION_CAP_EXCEEDED: "所选功能权限超过外包公司的授权上限",
+            BUSINESS_LINE_CAP_EXCEEDED: "所选业务线超过外包公司的授权范围",
+            BUSINESS_LINE_REQUIRED: "无法自动识别业务线，请从应聘记录入口明确选择视频或音频",
+            SCOPE_BUSINESS_LINE_FORBIDDEN: "当前账号无权操作该业务线",
+            SUPPLIER_NOT_FOUND: "外包公司不存在或已停用",
+            SUPPLIER_MANAGER_ROLE_INVALID: "外包公司负责人必须使用外包公司管理员账号类型",
+            SUPPLIER_ACCOUNT_PERMISSION_INVALID: "只有外包公司负责人可以拥有账号管理权限",
+            SIMULATION_READ_ONLY: "模拟外包公司视角时只能查看，不能修改数据",
             INTERVIEW_APPLICATION_REQUIRED: "安排面试必须关联应聘记录",
             INTERVIEW_ACTION_REQUIRED: "请通过应聘记录中的面试排期动作创建或变更面试",
             INTERVIEW_NOT_FOUND: "面试记录不存在或不在当前数据范围内",
             INTERVIEW_TIME_INVALID: "面试结束时间必须晚于开始时间",
             INTERVIEW_TIME_PAST: "面试开始时间必须晚于当前时间",
-            INTERVIEW_TIME_CONFLICT: "该面试官在所选时段已有安排，请更换时间或面试官",
+            INTERVIEW_TIME_CONFLICT: "该时段刚刚已被占用，请刷新时间看板后选择其他时间或面试官",
+            INTERVIEW_CONCURRENT_UPDATE: "面试安排已被其他操作更新，请刷新后重试",
+            INTERVIEWER_NOT_FOUND: "面试官不存在",
+            INTERVIEWER_INACTIVE: "面试官账号已停用",
+            INTERVIEWER_BUSINESS_LINE_MISMATCH: "面试官不负责该业务线",
+            INTERVIEWER_POSITION_MISMATCH: "面试官未配置该岗位的面试权限",
+            INTERVIEWER_NON_WORKING_DAY: "所选日期不是该面试官的工作日",
+            INTERVIEWER_OUTSIDE_WORKING_HOURS: "所选时间不在该面试官的工作时间内",
+            INTERVIEWER_WORKING_TIME_INVALID: "面试官工作时间配置无效",
+            INTERVIEW_DURATION_INVALID: "每场面试必须固定为 30 分钟",
+            INTERVIEW_SLOT_GRANULARITY_INVALID: "面试必须从整点或半点开始",
+            INTERVIEW_FIXED_BREAK_CONFLICT: "所选时间与平台固定休息时间冲突",
+            INTERVIEWER_UNAVAILABLE_BLOCK_CONFLICT: "所选时间与面试官的不可用时间冲突",
+            CALENDAR_RANGE_INVALID: "时间看板日期范围无效",
+            CALENDAR_RANGE_TOO_LARGE: "时间看板单次最多查询 14 天",
+            CALENDAR_BLOCK_TIME_INVALID: "不可用时间的开始和结束配置无效",
+            CALENDAR_DATE_INVALID: "日期格式无效",
+            CALENDAR_BLOCK_NOT_FOUND: "不可用时间记录不存在",
+            NOTIFICATION_NOT_FOUND: "通知不存在或已读",
             INTERVIEW_SCHEDULE_STATUS_INVALID: "当前应聘状态不能安排新一轮面试",
             INTERVIEW_RESULT_ACTION_REQUIRED: "面试结论必须在结构化面评提交后通过结论动作生成",
             INTERVIEW_FEEDBACK_INCOMPLETE: "请填写完整面评：岗位模板的所有维度均需 1–5 分，评语不少于 5 个字",
@@ -605,6 +673,7 @@ app.use(
             SCHEDULING_SLOT_INVALID: "所选面试时段无效",
             SCHEDULING_SLOT_UNAVAILABLE: "该时段刚被占用，请刷新后选择其他时段",
             SCHEDULING_REQUEST_ACTIVE_EXISTS: "该候选人已有待处理的自助约面邀请，请稍后重试",
+            SCHEDULING_FEATURE_DISABLED: "候选人自助约面功能当前已关闭，请由 HR 在时间看板中安排",
             INTERNAL_ERROR: "服务暂时不可用，请稍后重试",
           } as Record<string, string>
         )[code] || "请求失败",
