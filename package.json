@@ -8,10 +8,12 @@
     "dev:web": "vite",
     "dev:server": "tsx watch server/index.ts",
     "test:server": "node server/interviewReminderService.test.mjs",
-    "test": "node --import tsx --test server/recruitmentCore.test.ts server/autoDashboardParser.test.ts server/auth.test.ts server/dataScope.test.ts && npm run test:server",
+    "test": "node --import ./scripts/testSetup.mjs --import tsx --test server/recruitmentCore.test.ts server/autoDashboardParser.test.ts server/auth.test.ts server/dataScope.test.ts server/workflowService.test.ts && npm run test:server",
     "test:auto-dashboard": "node --import tsx --test server/autoDashboardParser.test.ts",
     "test:rbac:smoke": "node scripts/rbacSmoke.mjs",
     "test:business:smoke": "node --import tsx scripts/businessApiSmoke.ts",
+    "test:workflow:smoke": "node --import tsx scripts/workflowApiSmoke.ts",
+    "test:feedback-reminder:smoke": "node --import tsx scripts/feedbackReminderSmoke.ts",
     "build": "npm run build:web && npm run build:server",
     "build:web": "tsc -b && vite build",
     "build:server": "tsc -p tsconfig.server.json && cp server/*.mjs dist-server/server/ && node --check server/kimClient.mjs && node --check server/interviewReminderService.mjs",
@@ -42,7 +44,7 @@
     "pdfjs-dist": "^6.2.108",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
-    "xlsx": "^0.18.5",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
     "zod": "^4.4.3"
   },
   "devDependencies": {

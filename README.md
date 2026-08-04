@@ -20,7 +20,7 @@ npm run dev
 
 ## 登录、角色与供应商隔离
 
-所有业务 API（腾讯会议 webhook 与健康检查除外）均要求 `Authorization: Bearer <token>`。会话令牌只以 SHA-256 哈希保存在 `AuthSession`；密码使用带随机盐的 scrypt 哈希。供应商范围由服务端根据当前会话决定，客户端传入其他 `supplierId`、供应商名称、候选人 ID、导入任务 ID 或 dashboardId 均不能扩大数据范围。
+除健康检查、腾讯会议 webhook 和携带一次性随机令牌的候选人自助约面接口外，所有业务 API 均要求 `Authorization: Bearer <token>`。会话令牌只以 SHA-256 哈希保存在 `AuthSession`；密码使用带随机盐的 scrypt 哈希。供应商范围由服务端根据当前会话决定，客户端传入其他 `supplierId`、供应商名称、候选人 ID、导入任务 ID 或 dashboardId 均不能扩大数据范围。
 
 角色分为平台管理员、大部门负责人、内部招聘、视频招聘、音频招聘、供应商管理员、供应商视频专员和供应商音频专员。最终数据范围是“供应商范围 + 业务线范围”的交集；前端菜单仅优化体验，服务端 `buildDataScope` 对列表、详情、修改、导出、会议和看板接口统一强制范围。
 
@@ -56,8 +56,23 @@ npm run db:migrate     # 开发迁移
 npm run db:deploy      # 部署已有迁移
 npm run db:seed        # 初始化供应商、岗位与演示账号
 npm test               # 导入、权限范围与原有提醒测试
+npm run test:workflow:smoke          # 运行招聘全链路 API 回归（需已启动服务）
+npm run test:feedback-reminder:smoke # 验证 24 小时面评催办幂等性（需 DATABASE_URL）
 npm run build          # 前后端类型检查与生产构建
 ```
+
+## 招聘全链路工作流
+
+迁移 `prisma/migrations/20260804010000_add_recruitment_workflow` 增加了应聘状态事件、岗位面评模板、结构化面评、最终结论、Offer、职级调整、入职确认、接待任务与 Checklist、候选人自助约面邀请和服务端保存的筛选条件。
+
+- 应聘状态只能通过白名单动作流转；直接修改应聘状态、面试结果或入职日期会被拒绝，状态事件与操作日志使用登录账号或候选人自助预约身份留痕。
+- 招聘人员可直接排期，也可生成 72 小时有效的一次性链接，让候选人在 `/candidate/interview-booking/{token}` 自助选择三个候选时段。提交时使用 PostgreSQL advisory lock 再次检查面试官日历，并自动生成腾讯会议记录。
+- 面评按岗位模板维度进行 1–5 分结构化评分；所有有效轮次提交完整面评后才能生成最终结论。面试结束 24 小时未提交会生成幂等催办记录。
+- 面试通过后必须依次经过 Offer 待发起、已发出、候选人确认/拒绝/失效状态；候选人确认接受后才能回写入职日期。
+- 入职确认会自动创建并指派接待任务，四项必填 Checklist 全部完成并回执后，应聘记录才进入“培训中”。
+- AI 简历筛选结果与个人筛选条件均保存到 PostgreSQL，AI 结果只作辅助，不会自动淘汰候选人。
+
+Excel 依赖已升级到 SheetJS `0.20.3`，消除了旧版 `xlsx 0.18.5` 的原型污染与 ReDoS 审计告警。
 
 ## Excel 导入流程
 

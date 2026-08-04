@@ -24,6 +24,7 @@ import { prisma } from "./database.js";
 import { assertSupplierIdentity, isSupplierUser, supplierIdFor, supplierNameFor } from "./auth.js";
 import { buildDataScope, parseBusinessLine } from "./dataScopeService.js";
 import { classifyBusinessLine } from "./importClassificationService.js";
+import { assertWorkflowStatus, assertWorkflowTransition } from "./workflowService.js";
 
 const router = Router();
 const maxFileMb = Math.max(1, Number(process.env.MAX_IMPORT_FILE_MB || 15));
@@ -893,7 +894,8 @@ router.put(
         importTaskId: row.taskId,
         oldValue: json(oldData),
         newValue: json(data),
-        operator: clean(req.body.operator),
+        operatorId: req.auth!.id,
+        operator: req.auth!.name,
       },
     });
     return success(res, updated);
@@ -913,7 +915,6 @@ router.post(
   wrap(async (req, res) => {
     const body = z
       .object({
-        operator: z.string().min(1),
         allowWarnings: z.boolean().default(false),
       })
       .parse(req.body);
@@ -980,7 +981,8 @@ router.post(
                       ? "跳过重复数据"
                       : "标记人工复核",
                   importTaskId: row.taskId,
-                  operator: body.operator,
+                  operatorId: req.auth!.id,
+                  operator: req.auth!.name,
                   newValue: json({
                     rowNumber: row.rowNumber,
                     duplicateLevel: row.duplicateLevel,
@@ -1048,7 +1050,7 @@ router.post(
                 actualEntryDate: asDate(data.actualEntryDate),
                 leaveDate: asDate(data.leaveDate),
                 remark: data.remark,
-                updatedBy: body.operator,
+                updatedBy: req.auth!.name,
               };
               const update =
                 row.handlingAction === HandlingAction.MERGE
@@ -1093,8 +1095,8 @@ router.post(
                       leaveDate: asDate(data.leaveDate),
                       remark: data.remark,
                       source: "EXCEL_IMPORT",
-                      createdBy: body.operator,
-                      updatedBy: body.operator,
+                      createdBy: req.auth!.name,
+                      updatedBy: req.auth!.name,
                     },
                   });
                   break;
@@ -1113,7 +1115,7 @@ router.post(
                 candidateId: candidate!.id,
                 status: candidate!.currentStatus,
                 effectiveAt: new Date(),
-                operator: body.operator,
+                operator: req.auth!.name,
                 remark: "Excel 批量导入",
               },
             });
@@ -1134,6 +1136,13 @@ router.post(
                 businessData: detectedBusinessLine === BusinessLine.UNCLASSIFIED ? json({ classificationStatus: "待归类", sourceSheet: accessTask.sheetName }) : undefined,
               },
             });
+            await tx.applicationStatusEvent.create({ data: {
+              applicationId: application.id,
+              toStatus: application.currentStatus,
+              operatorId: req.auth!.id,
+              operatorName: req.auth!.name,
+              reason: "Excel 批量导入",
+            } });
             await tx.operationLog.create({
               data: {
                 module: "候选人",
@@ -1148,7 +1157,8 @@ router.post(
                 supplierId: supplier.id,
                 businessLine: detectedBusinessLine,
                 importTaskId: row.taskId,
-                operator: body.operator,
+                operatorId: req.auth!.id,
+                operator: req.auth!.name,
                 newValue: json({
                   candidateNo: candidate!.candidateNo,
                   rowNumber: row.rowNumber,
@@ -1178,7 +1188,8 @@ router.post(
                 module: "候选人导入",
                 action: "导入失败",
                 importTaskId: row.taskId,
-                operator: body.operator,
+                operatorId: req.auth!.id,
+                operator: req.auth!.name,
                 reason: failureReason,
                 newValue: json({ rowNumber: row.rowNumber }),
               },
@@ -1202,7 +1213,7 @@ router.post(
           create: {
             module: "候选人导入",
             action: "确认导入",
-            operator: body.operator,
+            operator: req.auth!.name,
             newValue: json({ imported, skipped, failed }),
           },
         },
@@ -1315,7 +1326,8 @@ router.delete(
           module: "候选人导入",
           action: "清理临时文件",
           importTaskId: task.id,
-          operator: clean(req.body?.operator),
+          operatorId: req.auth!.id,
+          operator: req.auth!.name,
         },
       }),
     ]);
@@ -1432,12 +1444,14 @@ const candidateBody = z.object({
   expectedEntryDate: z.string().optional().nullable(),
   actualEntryDate: z.string().optional().nullable(),
   remark: z.string().optional().nullable(),
-  operator: z.string().default("招聘专员"),
 });
 router.post(
   "/candidates",
   wrap(async (req, res) => {
     const body = candidateBody.parse(req.body);
+    assertWorkflowStatus(body.currentStatus);
+    if (!["简历待筛选", "待安排面试"].includes(body.currentStatus))
+      throw new Error("APPLICATION_STATUS_INITIAL_INVALID");
     assertSupplierIdentity(req);
     const phone = normalizePhone(body.phone),
       email = clean(body.email)?.toLowerCase() || null;
@@ -1497,8 +1511,8 @@ router.post(
           actualEntryDate: asDate(body.actualEntryDate),
           remark: body.remark,
           source: "MANUAL",
-          createdBy: body.operator,
-          updatedBy: body.operator,
+          createdBy: req.auth!.name,
+          updatedBy: req.auth!.name,
         },
       });
       await tx.candidateStatusEvent.create({
@@ -1506,7 +1520,7 @@ router.post(
           candidateId: created.id,
           status: created.currentStatus,
           effectiveAt: new Date(),
-          operator: body.operator,
+          operator: req.auth!.name,
           remark: "手工创建",
         },
       });
@@ -1530,8 +1544,8 @@ router.put(
     });
     if (!old) throw new Error("CANDIDATE_NOT_FOUND");
     const body = candidateBody.partial().parse(req.body);
+    if (body.currentStatus !== undefined) assertWorkflowTransition(old.currentStatus, body.currentStatus);
     const {
-      operator,
       supplierName: _supplierName,
       positionName: _positionName,
       ...candidatePatch
@@ -1568,7 +1582,7 @@ router.put(
             body.actualEntryDate === undefined
               ? undefined
               : asDate(body.actualEntryDate),
-          updatedBy: operator,
+          updatedBy: req.auth!.name,
         },
       });
       if (body.currentStatus && body.currentStatus !== old.currentStatus)
@@ -1577,7 +1591,7 @@ router.put(
             candidateId: old.id,
             status: body.currentStatus,
             effectiveAt: new Date(),
-            operator: body.operator || "招聘专员",
+            operator: req.auth!.name,
             remark: body.remark || "修改候选人状态",
           },
         });
@@ -1591,7 +1605,8 @@ router.put(
           candidateId: old.id,
           oldValue: json({ currentStatus: old.currentStatus }),
           newValue: json({ currentStatus: candidate.currentStatus }),
-          operator: body.operator,
+          operatorId: req.auth!.id,
+          operator: req.auth!.name,
         },
       });
       return candidate;
@@ -1612,7 +1627,7 @@ router.delete(
       where: { id: req.params.id, deletedAt: null, ...candidateScope(req) },
       data: {
         deletedAt: new Date(),
-        updatedBy: clean(req.body?.operator) || "招聘专员",
+        updatedBy: req.auth!.name,
       },
     });
     if (!updated.count) throw new Error("CANDIDATE_NOT_FOUND");
@@ -1621,7 +1636,8 @@ router.delete(
         module: "候选人",
         action: "删除候选人",
         candidateId: req.params.id,
-        operator: clean(req.body?.operator),
+        operatorId: req.auth!.id,
+        operator: req.auth!.name,
       },
     });
     return success(res, { id: req.params.id });

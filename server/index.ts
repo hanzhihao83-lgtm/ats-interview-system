@@ -22,6 +22,7 @@ import recruitmentRouter, {
 import autoDashboardRouter from "./autoDashboardRouter.js";
 import authRouter from "./authRouter.js";
 import businessRouter from "./businessRouter.js";
+import workflowRouter, { scanOverdueFeedbackReminders } from "./workflowRouter.js";
 import { isSupplierUser, requireAuth, requireRoles } from "./auth.js";
 import { UserRole } from "@prisma/client";
 import { assertDatabaseConnection, prisma } from "./database.js";
@@ -92,14 +93,31 @@ app.use(
     next();
   },
 );
+app.use("/api/public/interview-scheduling", (req, res, next) => {
+  const key = `${req.ip}:public-scheduling`, now = Date.now(), current = rateState.get(key);
+  const state = !current || current.resetAt < now
+    ? { count: 0, resetAt: now + 60_000 }
+    : current;
+  state.count += 1;
+  rateState.set(key, state);
+  if (state.count > 60)
+    return res.status(429).json({
+      success: false,
+      code: "RATE_LIMITED",
+      message: "请求过于频繁，请稍后重试",
+      requestId: res.locals.requestId,
+    });
+  next();
+});
 app.get("/api/health", (_req, res) => res.json({ success: true, data: { status: "ok" } }));
 app.use("/api/auth", authRouter);
 app.use("/api", (req, res, next) =>
-  req.path === "/webhooks/tencent-meeting" || req.path === "/kim/status"
+  req.path === "/webhooks/tencent-meeting" || req.path === "/kim/status" || req.path.startsWith("/public/interview-scheduling/")
     ? next()
     : requireAuth(req, res, next),
 );
 app.use("/api", businessRouter);
+app.use("/api", workflowRouter);
 app.use("/api", recruitmentRouter);
 app.use("/api/auto-dashboard", autoDashboardRouter);
 const send = (res: Response, status: number, body: object) =>
@@ -447,7 +465,43 @@ app.use(
       "DATA_SCOPE_FORBIDDEN",
       "APPLICATION_NOT_FOUND",
       "APPLICATION_CANDIDATE_REQUIRED",
+      "APPLICATION_STATUS_INVALID",
+      "APPLICATION_STATUS_INITIAL_INVALID",
+      "APPLICATION_STATUS_TRANSITION_INVALID",
+      "APPLICATION_ACTION_REQUIRED",
+      "WORKFLOW_ACTION_FORBIDDEN",
+      "INTERVIEW_APPLICATION_REQUIRED",
+      "INTERVIEW_ACTION_REQUIRED",
       "INTERVIEW_NOT_FOUND",
+      "INTERVIEW_TIME_INVALID",
+      "INTERVIEW_TIME_PAST",
+      "INTERVIEW_TIME_CONFLICT",
+      "INTERVIEW_SCHEDULE_STATUS_INVALID",
+      "INTERVIEW_RESULT_ACTION_REQUIRED",
+      "INTERVIEW_FEEDBACK_INCOMPLETE",
+      "INTERVIEW_FEEDBACK_REQUIRED",
+      "INTERVIEW_LEVEL_REQUIRED",
+      "INTERVIEW_REQUIRED",
+      "OFFER_PREREQUISITE_MISSING",
+      "OFFER_ACTIVE_EXISTS",
+      "OFFER_NOT_FOUND",
+      "OFFER_STATUS_INVALID",
+      "LEVEL_ADJUSTMENT_ACTIVE_EXISTS",
+      "LEVEL_ADJUSTMENT_NOT_FOUND",
+      "LEVEL_ADJUSTMENT_STATUS_INVALID",
+      "ONBOARDING_OFFER_NOT_CONFIRMED",
+      "ONBOARDING_ENTRY_DATE_REQUIRED",
+      "RECEPTION_TASK_NOT_FOUND",
+      "RECEPTION_CHECKLIST_ITEM_NOT_FOUND",
+      "RECEPTION_CHECKLIST_INCOMPLETE",
+      "SAVED_FILTER_NOT_FOUND",
+      "POSITION_NOT_FOUND",
+      "SCHEDULING_REQUEST_NOT_FOUND",
+      "SCHEDULING_REQUEST_EXPIRED",
+      "SCHEDULING_REQUEST_STATUS_INVALID",
+      "SCHEDULING_SLOT_INVALID",
+      "SCHEDULING_SLOT_UNAVAILABLE",
+      "SCHEDULING_REQUEST_ACTIVE_EXISTS",
     ]);
     const multerTooLarge = raw === "File too large";
     const code = multerTooLarge
@@ -459,9 +513,27 @@ app.use(
           : "INTERNAL_ERROR";
     const status = code.endsWith("NOT_FOUND")
       ? 404
-      : code === "IMPORT_TASK_ALREADY_CONFIRMED"
+      : new Set([
+          "IMPORT_TASK_ALREADY_CONFIRMED",
+          "APPLICATION_STATUS_TRANSITION_INVALID",
+          "INTERVIEW_TIME_CONFLICT",
+          "INTERVIEW_SCHEDULE_STATUS_INVALID",
+          "INTERVIEW_FEEDBACK_REQUIRED",
+          "INTERVIEW_REQUIRED",
+          "OFFER_PREREQUISITE_MISSING",
+          "OFFER_ACTIVE_EXISTS",
+          "OFFER_STATUS_INVALID",
+          "LEVEL_ADJUSTMENT_ACTIVE_EXISTS",
+          "LEVEL_ADJUSTMENT_STATUS_INVALID",
+          "ONBOARDING_OFFER_NOT_CONFIRMED",
+          "RECEPTION_CHECKLIST_INCOMPLETE",
+          "SCHEDULING_REQUEST_EXPIRED",
+          "SCHEDULING_REQUEST_STATUS_INVALID",
+          "SCHEDULING_SLOT_UNAVAILABLE",
+          "SCHEDULING_REQUEST_ACTIVE_EXISTS",
+        ]).has(code)
         ? 409
-        : code === "AUTH_SUPPLIER_REQUIRED" || code === "DATA_SCOPE_FORBIDDEN"
+        : code === "AUTH_SUPPLIER_REQUIRED" || code === "DATA_SCOPE_FORBIDDEN" || code === "WORKFLOW_ACTION_FORBIDDEN"
           ? 403
         : code === "DATABASE_UNAVAILABLE"
           ? 503
@@ -496,7 +568,43 @@ app.use(
             DATA_SCOPE_FORBIDDEN: "当前账号无权访问该供应商或业务部门数据",
             APPLICATION_NOT_FOUND: "应聘记录不存在或不在当前数据范围内",
             APPLICATION_CANDIDATE_REQUIRED: "创建应聘记录需要候选人姓名和岗位",
+            APPLICATION_STATUS_INVALID: "应聘状态无效",
+            APPLICATION_STATUS_INITIAL_INVALID: "新应聘记录必须从简历待筛选开始",
+            APPLICATION_STATUS_TRANSITION_INVALID: "当前状态不允许执行该流转",
+            APPLICATION_ACTION_REQUIRED: "状态、面试结论和入职日期必须通过对应流程动作修改",
+            WORKFLOW_ACTION_FORBIDDEN: "当前角色无权执行该流程动作",
+            INTERVIEW_APPLICATION_REQUIRED: "安排面试必须关联应聘记录",
+            INTERVIEW_ACTION_REQUIRED: "请通过应聘记录中的面试排期动作创建或变更面试",
             INTERVIEW_NOT_FOUND: "面试记录不存在或不在当前数据范围内",
+            INTERVIEW_TIME_INVALID: "面试结束时间必须晚于开始时间",
+            INTERVIEW_TIME_PAST: "面试开始时间必须晚于当前时间",
+            INTERVIEW_TIME_CONFLICT: "该面试官在所选时段已有安排，请更换时间或面试官",
+            INTERVIEW_SCHEDULE_STATUS_INVALID: "当前应聘状态不能安排新一轮面试",
+            INTERVIEW_RESULT_ACTION_REQUIRED: "面试结论必须在结构化面评提交后通过结论动作生成",
+            INTERVIEW_FEEDBACK_INCOMPLETE: "请填写完整面评：岗位模板的所有维度均需 1–5 分，评语不少于 5 个字",
+            INTERVIEW_FEEDBACK_REQUIRED: "仍有面试轮次未提交完整面评",
+            INTERVIEW_LEVEL_REQUIRED: "面试通过时必须填写定级",
+            INTERVIEW_REQUIRED: "至少完成一轮面试后才能生成结论",
+            OFFER_PREREQUISITE_MISSING: "仅面试结论为通过的候选人可以发起 Offer",
+            OFFER_ACTIVE_EXISTS: "该应聘记录已有处理中 Offer",
+            OFFER_NOT_FOUND: "Offer 不存在或不在当前数据范围内",
+            OFFER_STATUS_INVALID: "当前 Offer 状态不允许执行该操作",
+            LEVEL_ADJUSTMENT_ACTIVE_EXISTS: "已有待审批的职级调整申请",
+            LEVEL_ADJUSTMENT_NOT_FOUND: "职级调整申请不存在或不在当前数据范围内",
+            LEVEL_ADJUSTMENT_STATUS_INVALID: "该职级调整申请已处理",
+            ONBOARDING_OFFER_NOT_CONFIRMED: "候选人确认接受 Offer 后才能回写入职结果",
+            ONBOARDING_ENTRY_DATE_REQUIRED: "确认入职时必须填写入职日期",
+            RECEPTION_TASK_NOT_FOUND: "入职接待任务不存在或不在当前数据范围内",
+            RECEPTION_CHECKLIST_ITEM_NOT_FOUND: "接待清单项不存在",
+            RECEPTION_CHECKLIST_INCOMPLETE: "必填接待清单尚未完成",
+            SAVED_FILTER_NOT_FOUND: "筛选条件不存在",
+            POSITION_NOT_FOUND: "岗位不存在",
+            SCHEDULING_REQUEST_NOT_FOUND: "自助约面链接不存在",
+            SCHEDULING_REQUEST_EXPIRED: "自助约面链接已过期，请联系招聘人员重新发送",
+            SCHEDULING_REQUEST_STATUS_INVALID: "该自助约面链接已使用或已取消",
+            SCHEDULING_SLOT_INVALID: "所选面试时段无效",
+            SCHEDULING_SLOT_UNAVAILABLE: "该时段刚被占用，请刷新后选择其他时段",
+            SCHEDULING_REQUEST_ACTIVE_EXISTS: "该候选人已有待处理的自助约面邀请，请稍后重试",
             INTERNAL_ERROR: "服务暂时不可用，请稍后重试",
           } as Record<string, string>
         )[code] || "请求失败",
@@ -525,6 +633,12 @@ setInterval(
     scanAndSendInterviewReminders(store)
       .then(save)
       .catch((error: Error) => console.error("提醒扫描失败：", error.message)),
+  60_000,
+).unref();
+setInterval(
+  () =>
+    scanOverdueFeedbackReminders()
+      .catch((error: Error) => console.error("面评超时扫描失败：", error.message)),
   60_000,
 ).unref();
 setInterval(

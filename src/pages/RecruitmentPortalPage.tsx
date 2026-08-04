@@ -11,11 +11,10 @@ import CandidateApplicationListPage from "./candidates/CandidateApplicationListP
 import BusinessInterviewPage from "./interviews/BusinessInterviewPage";
 import BusinessPageHeader from "../components/business/BusinessPageHeader";
 import { businessDashboardApi } from "../api/businessDashboardApi";
-import { businessLineConfigs } from "../config/businessLineConfigs";
+import BusinessScreeningPage from "./screening/BusinessScreeningPage";
 
 const navigate = (path: string) => { history.pushState({}, "", path); dispatchEvent(new PopStateEvent("popstate")); };
 function SupplierPage({ businessLine }: { businessLine?: BusinessLine }) { const [rows, setRows] = useState<any[]>([]); useEffect(() => { businessDashboardApi.suppliers(businessLine).then(setRows); }, [businessLine]); return <Card title="供应商招聘贡献"><Table rowKey="supplierId" dataSource={rows} columns={[{ title: "供应商", dataIndex: "supplier" }, { title: "全部候选人", dataIndex: "candidates" }, { title: "视频", dataIndex: "video" }, { title: "音频", dataIndex: "audio" }, { title: "面试通过", dataIndex: "passed" }, { title: "实际入职", dataIndex: "joined" }, { title: "异常", dataIndex: "abnormal" }]} /></Card>; }
-function ScreeningPage({ businessLine }: { businessLine: BusinessLine }) { const config = businessLineConfigs[businessLine]; return <><BusinessPageHeader businessLine={businessLine} /><Card title={config.screeningTitle}><Typography.Paragraph>AI 将按当前业务线的岗位规则进行辅助筛选，不会自动淘汰候选人。</Typography.Paragraph><Space wrap>{config.featureFields.map((field) => <Button key={field}>{field}</Button>)}</Space></Card><CandidateApplicationListPage businessLine={businessLine} /></>; }
 function BusinessContent({ path }: { path: string }) {
   if (path === "/dashboard") return <CombinedDashboardPage />;
   if (path === "/candidates") return <><BusinessPageHeader businessLine="COMBINED" /><CandidateApplicationListPage /></>;
@@ -25,7 +24,7 @@ function BusinessContent({ path }: { path: string }) {
   if (!match) return <Result status="404" title="页面不存在" extra={<Button onClick={() => navigate("/dashboard")}>返回看板</Button>} />;
   const line = match[1] === "video" ? "VIDEO" : "AUDIO", page = match[2];
   if (page === "dashboard") return line === "VIDEO" ? <VideoDashboardPage /> : <AudioDashboardPage />;
-  if (page === "screening") return <ScreeningPage businessLine={line} />;
+  if (page === "screening") return <BusinessScreeningPage businessLine={line} />;
   if (page === "interviews") return <><BusinessPageHeader businessLine={line} /><BusinessInterviewPage businessLine={line} /></>;
   if (page === "onboarding") return <><BusinessPageHeader businessLine={line} /><CandidateApplicationListPage businessLine={line} status="待入职" /></>;
   if (page === "risks") return <><BusinessPageHeader businessLine={line} /><CandidateApplicationListPage businessLine={line} status="异常" /></>;

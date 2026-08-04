@@ -72,6 +72,47 @@ enum ImportRowStatus {
   MANUAL_REVIEW
 }
 
+enum InterviewFeedbackStatus {
+  DRAFT
+  SUBMITTED
+  OVERDUE
+}
+
+enum OfferStatus {
+  PENDING_INITIATION
+  SENT
+  CANDIDATE_CONFIRMED
+  REJECTED
+  EXPIRED
+}
+
+enum LevelAdjustmentStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  WITHDRAWN
+}
+
+enum OnboardingResult {
+  PENDING
+  CONFIRMED
+  DECLINED
+}
+
+enum ReceptionTaskStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum SchedulingRequestStatus {
+  PENDING
+  BOOKED
+  EXPIRED
+  CANCELLED
+}
+
 model Supplier {
   id               String                 @id @default(cuid())
   name             String
@@ -123,15 +164,16 @@ model AuthSession {
 }
 
 model JobPosition {
-  id           String                 @id @default(cuid())
-  name         String
-  projectName  String?
-  department   String?
-  status       RecordStatus           @default(ACTIVE)
-  createdAt    DateTime               @default(now())
-  updatedAt    DateTime               @updatedAt
-  candidates   Candidate[]
-  applications CandidateApplication[]
+  id               String                 @id @default(cuid())
+  name             String
+  projectName      String?
+  department       String?
+  feedbackTemplate Json?
+  status           RecordStatus           @default(ACTIVE)
+  createdAt        DateTime               @default(now())
+  updatedAt        DateTime               @updatedAt
+  candidates       Candidate[]
+  applications     CandidateApplication[]
 
   @@index([name])
 }
@@ -206,13 +248,20 @@ model CandidateApplication {
   updatedAt         DateTime     @updatedAt
   deletedAt         DateTime?
 
-  candidate        Candidate                 @relation(fields: [candidateId], references: [id])
-  supplier         Supplier                  @relation(fields: [supplierId], references: [id])
-  position         JobPosition?              @relation(fields: [positionId], references: [id])
-  interviews       Interview[]
-  screeningResults AIResumeScreeningResult[]
-  kimNotifications KimNotificationLog[]
-  meetingRecords   TencentMeetingRecord[]
+  candidate          Candidate                    @relation(fields: [candidateId], references: [id])
+  supplier           Supplier                     @relation(fields: [supplierId], references: [id])
+  position           JobPosition?                 @relation(fields: [positionId], references: [id])
+  interviews         Interview[]
+  screeningResults   AIResumeScreeningResult[]
+  kimNotifications   KimNotificationLog[]
+  meetingRecords     TencentMeetingRecord[]
+  statusEvents       ApplicationStatusEvent[]
+  conclusion         InterviewConclusion?
+  offers             Offer[]
+  levelAdjustments   JobLevelAdjustment[]
+  onboarding         OnboardingConfirmation?
+  receptionTask      ReceptionTask?
+  schedulingRequests InterviewSchedulingRequest[]
 
   @@index([candidateId])
   @@index([supplierId])
@@ -252,6 +301,7 @@ model Interview {
   meetingId          String?
   meetingUrl         String?
   feedback           String?
+  feedbackDueAt      DateTime?
   createdAt          DateTime               @default(now())
   updatedAt          DateTime               @updatedAt
   candidate          Candidate              @relation(fields: [candidateId], references: [id])
@@ -259,6 +309,7 @@ model Interview {
   supplier           Supplier?              @relation(fields: [supplierId], references: [id])
   kimNotifications   KimNotificationLog[]
   meetingRecords     TencentMeetingRecord[]
+  feedbackRecord     InterviewFeedback?
 
   @@index([candidateId])
   @@index([applicationId])
@@ -347,6 +398,7 @@ model OperationLog {
   oldValue      Json?
   newValue      Json?
   operator      String?
+  operatorId    String?
   reason        String?
   operatedAt    DateTime             @default(now())
   candidate     Candidate?           @relation(fields: [candidateId], references: [id])
@@ -357,6 +409,191 @@ model OperationLog {
   @@index([operatedAt])
   @@index([applicationId])
   @@index([supplierId, businessLine])
+}
+
+model ApplicationStatusEvent {
+  id            String   @id @default(cuid())
+  applicationId String
+  fromStatus    String?
+  toStatus      String
+  operatorId    String
+  operatorName  String
+  reason        String
+  occurredAt    DateTime @default(now())
+
+  application CandidateApplication @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+
+  @@index([applicationId, occurredAt])
+  @@index([operatorId, occurredAt])
+}
+
+model InterviewFeedback {
+  id              String                  @id @default(cuid())
+  interviewId     String                  @unique
+  templateVersion String
+  dimensionScores Json
+  comment         String
+  status          InterviewFeedbackStatus @default(DRAFT)
+  dueAt           DateTime
+  submittedById   String?
+  submittedByName String?
+  submittedAt     DateTime?
+  createdAt       DateTime                @default(now())
+  updatedAt       DateTime                @updatedAt
+
+  interview Interview @relation(fields: [interviewId], references: [id], onDelete: Cascade)
+
+  @@index([status, dueAt])
+  @@index([submittedById, submittedAt])
+}
+
+model InterviewConclusion {
+  id            String   @id @default(cuid())
+  applicationId String   @unique
+  finalResult   String
+  finalLevel    String?
+  roundSummary  Json
+  decidedById   String
+  decidedByName String
+  decidedAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  application CandidateApplication @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+
+  @@index([decidedById, decidedAt])
+}
+
+model Offer {
+  id                   String      @id @default(cuid())
+  applicationId        String
+  status               OfferStatus @default(PENDING_INITIATION)
+  initiatedById        String
+  initiatedByName      String
+  sentById             String?
+  sentByName           String?
+  sentAt               DateTime?
+  candidateRespondedAt DateTime?
+  expiredAt            DateTime?
+  rejectedReason       String?
+  createdAt            DateTime    @default(now())
+  updatedAt            DateTime    @updatedAt
+
+  application CandidateApplication @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+
+  @@index([applicationId, createdAt])
+  @@index([status, updatedAt])
+}
+
+model JobLevelAdjustment {
+  id              String                @id @default(cuid())
+  applicationId   String
+  requestedLevel  String
+  reason          String
+  status          LevelAdjustmentStatus @default(PENDING)
+  requestedById   String
+  requestedByName String
+  reviewedById    String?
+  reviewedByName  String?
+  reviewComment   String?
+  reviewedAt      DateTime?
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+
+  application CandidateApplication @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+
+  @@index([applicationId, createdAt])
+  @@index([status, createdAt])
+}
+
+model OnboardingConfirmation {
+  id              String           @id @default(cuid())
+  applicationId   String           @unique
+  result          OnboardingResult @default(PENDING)
+  entryDate       DateTime?
+  confirmedById   String
+  confirmedByName String
+  note            String?
+  confirmedAt     DateTime         @default(now())
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  application CandidateApplication @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+}
+
+model ReceptionTask {
+  id              String              @id @default(cuid())
+  applicationId   String              @unique
+  assigneeId      String?
+  assigneeName    String
+  status          ReceptionTaskStatus @default(PENDING)
+  dueAt           DateTime
+  createdById     String
+  createdByName   String
+  completedById   String?
+  completedByName String?
+  completedAt     DateTime?
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  application CandidateApplication     @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  checklist   ReceptionChecklistItem[]
+
+  @@index([status, dueAt])
+  @@index([assigneeId, status])
+}
+
+model ReceptionChecklistItem {
+  id              String    @id @default(cuid())
+  taskId          String
+  title           String
+  required        Boolean   @default(true)
+  completed       Boolean   @default(false)
+  completedById   String?
+  completedByName String?
+  completedAt     DateTime?
+  sortOrder       Int       @default(0)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  task ReceptionTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([taskId, sortOrder])
+}
+
+model SavedFilter {
+  id        String   @id @default(cuid())
+  userId    String
+  module    String
+  name      String
+  filters   Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, module, name])
+  @@index([userId, module])
+}
+
+model InterviewSchedulingRequest {
+  id            String                  @id @default(cuid())
+  applicationId String
+  tokenHash     String                  @unique
+  interviewer   String
+  round         Int                     @default(1)
+  roundName     String
+  proposedSlots Json
+  bookedSlot    Json?
+  status        SchedulingRequestStatus @default(PENDING)
+  expiresAt     DateTime
+  bookedAt      DateTime?
+  createdById   String
+  createdByName String
+  createdAt     DateTime                @default(now())
+  updatedAt     DateTime                @updatedAt
+
+  application CandidateApplication @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+
+  @@index([applicationId, createdAt])
+  @@index([status, expiresAt])
 }
 
 model ImportFileRecord {
@@ -506,6 +743,7 @@ model KimNotificationLog {
   status         String
   messageSummary String?
   errorMessage   String?
+  idempotencyKey String?      @unique
   createdAt      DateTime     @default(now())
 
   application CandidateApplication @relation(fields: [applicationId], references: [id], onDelete: Cascade)

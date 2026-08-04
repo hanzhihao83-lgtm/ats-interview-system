@@ -100,6 +100,7 @@ const applicationBody = z.object({
 
 router.post("/applications", wrap(async (req, res) => {
   const body = applicationBody.parse(req.body), scope = scopeFor(req, body);
+  if (body.currentStatus !== "简历待筛选") throw new Error("APPLICATION_STATUS_INITIAL_INVALID");
   const supplierId = scope.supplierId || body.supplierId;
   if (!supplierId || (scope.businessLine && scope.businessLine !== body.businessLine)) throw new ScopeForbiddenError("应聘记录超出当前数据范围");
   const result = await prisma.$transaction(async (tx) => {
@@ -131,7 +132,14 @@ router.post("/applications", wrap(async (req, res) => {
       interviewResult: body.interviewResult, expectedEntryDate: date(body.expectedEntryDate), actualEntryDate: date(body.actualEntryDate),
       businessData: body.businessData ? json(body.businessData) : undefined, createdById: req.auth!.id,
     } });
-    await tx.operationLog.create({ data: { module: "应聘记录", action: "创建应聘记录", candidateId: candidate.id, applicationId: application.id, supplierId, businessLine: body.businessLine, operator: req.auth!.name } });
+    await tx.applicationStatusEvent.create({ data: {
+      applicationId: application.id,
+      toStatus: application.currentStatus,
+      operatorId: req.auth!.id,
+      operatorName: req.auth!.name,
+      reason: "创建应聘记录",
+    } });
+    await tx.operationLog.create({ data: { module: "应聘记录", action: "创建应聘记录", candidateId: candidate.id, applicationId: application.id, supplierId, businessLine: body.businessLine, operatorId: req.auth!.id, operator: req.auth!.name } });
     return application;
   });
   return success(res, await prisma.candidateApplication.findUnique({ where: { id: result.id }, include: applicationInclude }), 201);
@@ -139,6 +147,8 @@ router.post("/applications", wrap(async (req, res) => {
 
 router.put("/applications/:id", wrap(async (req, res) => {
   const body = applicationBody.partial().omit({ candidateId: true, supplierId: true, businessLine: true }).parse(req.body), scope = scopeFor(req);
+  if (body.currentStatus !== undefined || body.interviewResult !== undefined || body.expectedEntryDate !== undefined || body.actualEntryDate !== undefined)
+    throw new Error("APPLICATION_ACTION_REQUIRED");
   const existing = await prisma.candidateApplication.findFirst({ where: { id: String(req.params.id), ...applicationScopeWhere(scope) } });
   if (!existing) throw new Error("APPLICATION_NOT_FOUND");
   const updated = await prisma.candidateApplication.update({ where: { id: existing.id }, data: {
@@ -148,7 +158,7 @@ router.put("/applications/:id", wrap(async (req, res) => {
     actualEntryDate: body.actualEntryDate === undefined ? undefined : date(body.actualEntryDate),
     businessData: body.businessData === undefined ? undefined : body.businessData ? json(body.businessData) : Prisma.JsonNull,
   } });
-  await prisma.operationLog.create({ data: { module: "应聘记录", action: "更新应聘记录", candidateId: existing.candidateId, applicationId: existing.id, supplierId: existing.supplierId, businessLine: existing.businessLine, oldValue: json({ currentStatus: existing.currentStatus }), newValue: json({ currentStatus: updated.currentStatus }), operator: req.auth!.name } });
+  await prisma.operationLog.create({ data: { module: "应聘记录", action: "更新应聘记录", candidateId: existing.candidateId, applicationId: existing.id, supplierId: existing.supplierId, businessLine: existing.businessLine, oldValue: json({ currentStatus: existing.currentStatus }), newValue: json({ currentStatus: updated.currentStatus }), operatorId: req.auth!.id, operator: req.auth!.name } });
   return success(res, updated);
 }));
 
@@ -171,7 +181,6 @@ router.get("/candidates/:id", wrap(async (req, res) => scopedOrThrow(req, "Candi
   return success(res, candidate);
 })));
 
-const interviewBody = z.object({ applicationId: z.string().min(1), scheduledStartTime: z.string(), scheduledEndTime: z.string().optional().nullable(), round: z.number().int().positive().optional(), roundName: z.string().optional().nullable(), interviewer: z.string().optional().nullable(), status: z.string().default("待面试"), result: z.string().optional().nullable(), feedback: z.string().optional().nullable() });
 router.get("/interviews", wrap(async (req, res) => scopedOrThrow(req, "Interview", undefined, requested(req), async (scope) => {
   const { page, pageSize } = pagination(req), where: Prisma.InterviewWhereInput = {
     ...(scope.supplierId ? { supplierId: scope.supplierId } : {}), ...(scope.businessLine ? { businessLine: scope.businessLine } : {}),
@@ -191,15 +200,7 @@ router.get("/interviews/:id", wrap(async (req, res) => {
   return success(res, row);
 }));
 
-router.post("/interviews", (req, _res, next) => req.body?.applicationId ? next() : next("router"));
-router.post("/interviews", wrap(async (req, res) => {
-  const body = interviewBody.parse(req.body), scope = scopeFor(req);
-  const application = await prisma.candidateApplication.findFirst({ where: { id: body.applicationId, ...applicationScopeWhere(scope) } });
-  if (!application) throw new Error("APPLICATION_NOT_FOUND");
-  const row = await prisma.interview.create({ data: { applicationId: application.id, candidateId: application.candidateId, supplierId: application.supplierId, businessLine: application.businessLine, scheduledStartTime: new Date(body.scheduledStartTime), scheduledEndTime: date(body.scheduledEndTime), round: body.round, roundName: body.roundName, interviewer: body.interviewer, status: body.status, result: body.result, feedback: body.feedback } });
-  void prisma.kimNotificationLog.create({ data: { applicationId: application.id, interviewId: row.id, supplierId: application.supplierId, businessLine: application.businessLine, status: "PENDING", messageSummary: `【${lineName(application.businessLine)}面试提醒】${body.scheduledStartTime}` } }).catch(() => undefined);
-  return success(res, row, 201);
-}));
+router.post("/interviews", (_req, _res, next) => next(new Error("INTERVIEW_ACTION_REQUIRED")));
 
 router.post("/interviews/:id/create-meeting", (req, _res, next) => String(req.params.id).startsWith("INT-") ? next("router") : next());
 router.post("/interviews/:id/create-meeting", wrap(async (req, res) => {
@@ -214,14 +215,7 @@ router.post("/interviews/:id/create-meeting", wrap(async (req, res) => {
   return success(res, record, 201);
 }));
 
-router.put("/interviews/:id", wrap(async (req, res) => {
-  const scope = scopeFor(req), existing = await prisma.interview.findFirst({ where: { id: String(req.params.id), ...(scope.supplierId ? { supplierId: scope.supplierId } : {}), ...(scope.businessLine ? { businessLine: scope.businessLine } : {}) } });
-  if (!existing) throw new Error("INTERVIEW_NOT_FOUND");
-  const body = interviewBody.omit({ applicationId: true }).partial().parse(req.body);
-  const row = await prisma.interview.update({ where: { id: existing.id }, data: { scheduledStartTime: body.scheduledStartTime ? new Date(body.scheduledStartTime) : undefined, scheduledEndTime: body.scheduledEndTime === undefined ? undefined : date(body.scheduledEndTime), round: body.round, roundName: body.roundName, interviewer: body.interviewer, status: body.status, result: body.result, feedback: body.feedback } });
-  if (body.result) await prisma.candidateApplication.update({ where: { id: existing.applicationId! }, data: { interviewResult: body.result } }).catch(() => undefined);
-  return success(res, row);
-}));
+router.put("/interviews/:id", (_req, _res, next) => next(new Error("INTERVIEW_ACTION_REQUIRED")));
 
 async function dashboardCounts(scope: DataScope) {
   const where = applicationScopeWhere(scope);
