@@ -3,11 +3,30 @@ import { hashPassword } from "./auth.js";
 import { prisma } from "./database.js";
 
 export async function ensureBootstrapAdmin() {
-  const existing = await prisma.user.count({ where: { role: UserRole.PLATFORM_ADMIN } });
-  if (existing) return;
   const password = process.env.BOOTSTRAP_ADMIN_PASSWORD;
+  const resetPassword = process.env.RESET_BOOTSTRAP_ADMIN_PASSWORD === "true";
+  const existing = await prisma.user.findFirst({
+    where: { role: UserRole.PLATFORM_ADMIN },
+    orderBy: { createdAt: "asc" },
+  });
+  if (existing && !resetPassword) return;
   if (!password || password.length < 12) {
-    console.warn("尚未创建平台管理员：请设置至少 12 位的 BOOTSTRAP_ADMIN_PASSWORD");
+    console.warn(
+      existing
+        ? "未重置平台管理员密码：请设置至少 12 位的 BOOTSTRAP_ADMIN_PASSWORD"
+        : "尚未创建平台管理员：请设置至少 12 位的 BOOTSTRAP_ADMIN_PASSWORD",
+    );
+    return;
+  }
+  if (existing) {
+    await prisma.$transaction([
+      prisma.user.update({
+        where: { id: existing.id },
+        data: { passwordHash: hashPassword(password), status: "ACTIVE" },
+      }),
+      prisma.authSession.deleteMany({ where: { userId: existing.id } }),
+    ]);
+    console.log("已按一次性开关重置平台管理员密码");
     return;
   }
   await prisma.user.create({ data: {
