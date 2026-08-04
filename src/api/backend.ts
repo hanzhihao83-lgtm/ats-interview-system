@@ -7,7 +7,7 @@ export interface ApiResponse<T> {
 }
 const productionApiBaseUrl = "https://ats-recruitment-api-hanzhihao.onrender.com";
 const apiBaseUrl = String(
-  import.meta.env.VITE_API_BASE_URL || (import.meta.env.PROD ? productionApiBaseUrl : ""),
+  import.meta.env.PROD ? productionApiBaseUrl : import.meta.env.VITE_API_BASE_URL || "",
 ).replace(/\/$/, "");
 export const AUTH_TOKEN_KEY = "recruitment_auth_token";
 export const apiUrl = (url: string) => `${apiBaseUrl}${url}`;
