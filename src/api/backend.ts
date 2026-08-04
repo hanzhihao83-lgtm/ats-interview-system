@@ -5,7 +5,10 @@ export interface ApiResponse<T> {
   message?: string;
   requestId?: string;
 }
-const apiBaseUrl = String(import.meta.env.VITE_API_BASE_URL || "").replace(/\/$/, "");
+const productionApiBaseUrl = "https://ats-recruitment-api-hanzhihao.onrender.com";
+const apiBaseUrl = String(
+  import.meta.env.VITE_API_BASE_URL || (import.meta.env.PROD ? productionApiBaseUrl : ""),
+).replace(/\/$/, "");
 export const AUTH_TOKEN_KEY = "recruitment_auth_token";
 export const apiUrl = (url: string) => `${apiBaseUrl}${url}`;
 export function authHeaders(headers?: HeadersInit) {
